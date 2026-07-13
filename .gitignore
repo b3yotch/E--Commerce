@@ -25,3 +25,6 @@ Thumbs.db
 # Ignore test files if desired
 test.py
 scripts/
+
+test_groq.py
+model_comparison_output.md

@@ -1,18 +1,22 @@
 """
-Thin wrapper around Ollama's chat API that coerces a model's response into a
-Pydantic schema. Keeping this generic (not research-agent-specific) so any
-later agent (creative strategy, critic, etc.) can reuse it with its own model
-and schema.
+Thin wrappers around model APIs that coerce a model's response into a
+Pydantic schema. Keeping these generic (not agent-specific) so any agent can
+reuse them with its own model and schema.
+
+Two separate entry points, not one function with a provider branch inside:
+Ollama and Groq need genuinely different workarounds (see each function's
+docstring), and folding both into one function with an if/else would hide
+that they're solving different problems rather than sharing one mechanism.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import typing
 from typing import Type, TypeVar
 
 import ollama
+from groq import AsyncGroq
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -22,48 +26,6 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMExtractionError(Exception):
     """Raised when the model output can't be parsed/validated against the schema."""
-
-
-def _placeholder_for_annotation(annotation: object) -> object:
-    """Pick an illustrative placeholder value for a field's Python type, so
-    the example instance is valid-shaped JSON without needing real data."""
-    origin = typing.get_origin(annotation)
-
-    if origin is typing.Union:
-        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
-        return _placeholder_for_annotation(non_none[0]) if non_none else None
-    if origin in (list, set, tuple):
-        return []
-    if origin is dict:
-        return {}
-    if annotation is str:
-        return "..."
-    if annotation is int:
-        return 0
-    if annotation is float:
-        return 0.0
-    if annotation is bool:
-        return False
-    return "..."
-
-
-def _example_instance(schema: Type[BaseModel]) -> dict:
-    """
-    Build a placeholder JSON *instance* of `schema` - not the schema
-    definition itself. Smaller models given a raw JSON Schema (with its own
-    `properties`/`type`/`description` meta-keys) can mistake "match this
-    schema" for "return this schema" - it looks structurally like a valid
-    JSON object with a similar vocabulary. A filled-shape example removes
-    that ambiguity entirely.
-    """
-    return {name: _placeholder_for_annotation(field.annotation) for name, field in schema.model_fields.items()}
-
-
-def _field_descriptions(schema: Type[BaseModel]) -> str:
-    lines = []
-    for name, field in schema.model_fields.items():
-        lines.append(f"- {name}: {field.description or '(no extra notes)'}")
-    return "\n".join(lines)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -114,14 +76,15 @@ async def structured_chat(
     Ollama as of mid-2026 (ollama/ollama#10929, #14645):
       - think left unset (defaults to True) + format=schema -> the model can
         burn its entire output budget on the hidden thinking trace and never
-        emit the final JSON, returning EMPTY content.
+        emit the final JSON, returning EMPTY content. This is exactly the
+        `Invalid JSON: EOF while parsing a value` / empty raw output failure.
       - think=False + format=schema -> the format constraint is silently
         IGNORED and the model returns free-form text instead of JSON.
     Net effect: native `format` isn't reliable on this model family right
-    now. Workaround: disable thinking, drop `format`, and instruct the model
-    with a filled-shape example (not the raw JSON Schema - see
-    _example_instance's docstring for why that distinction matters), then
-    parse the response ourselves with a tolerant extractor.
+    now. Workaround: disable thinking, drop `format`, describe the schema in
+    the prompt instead, and parse the response ourselves with a tolerant
+    extractor. Revisit once the upstream bugs are fixed - `format` is the
+    more robust mechanism when it actually works.
 
     Also sets num_ctx explicitly: Ollama's runtime default context window
     (2048-4096 depending on version) is unrelated to a model's advertised
@@ -130,18 +93,10 @@ async def structured_chat(
     """
     client = ollama.AsyncClient(host=settings.ollama_host)
 
-    example_json = json.dumps(_example_instance(schema), indent=2)
-    field_notes = _field_descriptions(schema)
-
     schema_hint = (
         "\n\nRespond with ONLY a single JSON object - no markdown code fences, "
-        "no commentary before or after it. Your response must be a FILLED-IN "
-        "INSTANCE containing real data extracted from the page, in exactly "
-        "this shape (the values below are placeholders showing the expected "
-        "type, not the schema - do not include keys like 'properties', "
-        "'type', or 'description' anywhere in your answer):\n"
-        f"{example_json}\n\n"
-        f"What each field means:\n{field_notes}"
+        "no commentary before or after it - matching exactly this JSON schema:\n"
+        f"{json.dumps(schema.model_json_schema(), indent=2)}"
     )
 
     response = await client.chat(
@@ -173,4 +128,58 @@ async def structured_chat(
     except Exception as exc:  # noqa: BLE001 - we want to wrap any parse/validation error
         raise LLMExtractionError(
             f"Model output failed schema validation: {exc}\nRaw output: {raw_content[:500]!r}"
+        ) from exc
+
+
+async def structured_chat_groq(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    schema: Type[T],
+    temperature: float = 0.2,
+) -> T:
+    """
+    Call a Groq-hosted model and coerce its response into `schema`.
+
+    Unlike Ollama+qwen3.5 (see structured_chat's docstring), Groq's
+    OpenAI-compatible API supports native JSON-schema-constrained decoding
+    without the thinking-trace/format collision bug - so this path uses
+    response_format directly: the schema is enforced server-side rather than
+    just requested in text and parsed tolerantly afterward.
+
+    NOTE: verify against Groq's current docs which models have "strict"
+    json_schema support before relying on this for a new model - schema
+    enforcement strength has varied by model even within one provider.
+    """
+    client = AsyncGroq(api_key=settings.groq_api_key)
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=settings.groq_max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": schema.model_json_schema(),
+                },
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - network/API errors also need to trigger fallback in nodes.py
+        raise LLMExtractionError(f"Groq API call failed for model {model!r}: {exc}") from exc
+
+    raw_content = response.choices[0].message.content or ""
+
+    try:
+        parsed = json.loads(raw_content)
+        return schema.model_validate(parsed)
+    except Exception as exc:  # noqa: BLE001
+        raise LLMExtractionError(
+            f"Groq output failed schema validation for model {model!r}: {exc}\nRaw output: {raw_content[:500]!r}"
         ) from exc
