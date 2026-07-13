@@ -73,15 +73,40 @@ mode (asserting the mock LLM is actually called twice on a retry, not once).
 
 ### 3. Bot detection on real sites
 
-A real target (Myntra) returned `net::ERR_HTTP2_PROTOCOL_ERROR` - a
-connection-level rejection, not a timeout - consistent with bot-detection
-tearing down the connection based on request fingerprinting. Mitigated with
-`--disable-http2`, `--disable-blink-features=AutomationControlled`, and a
-realistic browser context (locale, timezone, viewport, headers) instead of
-Playwright's bare defaults. Important caveat kept in the README: this
-defeats basic detection, not necessarily hardened anti-bot infrastructure -
-that's a fundamentally different problem (residential proxies, stealth
-plugins) than anything fixable by tuning one scraper function.
+Testing against a real ecommerce target (Myntra) exposed a common challenge with
+modern JavaScript applications: requests could fail with
+`net::ERR_HTTP2_PROTOCOL_ERROR`, a connection-level rejection that is often
+consistent with bot-detection terminating the session before a normal HTTP
+response is returned.
+
+To improve reliability, the scraper was hardened with several defensive
+measures while preserving the existing extraction pipeline:
+
+- Disabled HTTP/2 (`--disable-http2`) to avoid protocol-level connection
+  failures observed on some requests.
+- Reduced obvious automation fingerprints using
+  `--disable-blink-features=AutomationControlled` and overriding
+  `navigator.webdriver` before any page scripts execute.
+- Configured a realistic browser context (User-Agent, locale, timezone,
+  viewport, and `Accept-Language`) instead of relying on Playwright defaults.
+- Added navigation fallbacks (`networkidle`, `domcontentloaded`, and `commit`)
+  with short backoff intervals, making navigation more resilient across
+  different rendering strategies.
+- Allowed additional hydration time after navigation so React-based pages could
+  finish rendering before HTML extraction.
+- Simulated user scrolling via mouse wheel events to trigger lazy-loaded
+  content such as review widgets that rely on `IntersectionObserver`.
+- Included common browser request headers (for example, `Referer` and
+  `Upgrade-Insecure-Requests`) to better resemble a normal browser session.
+
+These improvements significantly reduce failures caused by basic browser
+fingerprinting and timing issues. However, they are not intended to bypass
+enterprise-grade anti-bot systems. Sites employing advanced bot protection
+(Akamai, PerimeterX/Human, Cloudflare Bot Management, DataDome, etc.) may
+still require additional infrastructure such as residential proxies, browser
+stealth frameworks, session persistence, or authenticated user sessions. Those
+concerns are outside the scope of this scraper and are intentionally not
+handled by the extraction layer.
 
 ### 4. Lazy-loaded content that no fixed wait can solve
 
