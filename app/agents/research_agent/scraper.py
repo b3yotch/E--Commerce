@@ -97,19 +97,42 @@ async def _goto_with_retries(page, url: str) -> None:
     just reproduces it immediately. We vary wait_until strategy and back off
     briefly between attempts instead of retrying identically.
     """
-    strategies = ["domcontentloaded", "commit"]
+
+    # Set headers once
+    await page.set_extra_http_headers({
+        "Referer": "https://www.google.com/",
+        "Upgrade-Insecure-Requests": "1",
+    })
+
+    strategies = [
+        ("networkidle", 3000),
+        ("domcontentloaded", 2000),
+        ("commit", 2000),
+    ]
+
     last_error: Exception | None = None
 
-    for attempt, wait_until in enumerate(strategies):
+    for attempt, (wait_until, extra_wait) in enumerate(strategies):
         try:
-            await page.goto(url, timeout=settings.scrape_timeout_ms, wait_until=wait_until)
+            await page.goto(
+                url,
+                timeout=settings.scrape_timeout_ms,
+                wait_until=wait_until,
+            )
+
+            # Give React/SPA apps time to hydrate
+            await page.wait_for_timeout(extra_wait)
+
             return
+
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+
             if attempt < len(strategies) - 1:
                 await page.wait_for_timeout(1500)
 
-    raise last_error  # type: ignore[misc]
+    raise last_error
+    
 
 
 def _review_count_hint(json_ld_product: dict | None) -> int | None:
@@ -148,8 +171,8 @@ async def _scroll_to_trigger_lazy_content(page) -> None:
         height = await page.evaluate("document.body.scrollHeight")
         steps = 6
         for i in range(1, steps + 1):
-            await page.evaluate(f"window.scrollTo(0, {height} * {i} / {steps})")
-            await page.wait_for_timeout(400)
+            await page.mouse.wheel(0, height // steps)
+            await page.wait_for_timeout(700)
         await page.evaluate("window.scrollTo(0, 0)")  # back to top, tidy but not required
     except Exception:
         pass
@@ -172,11 +195,12 @@ async def scrape_product_page(url: str) -> ScrapedProductData:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            # --disable-http2 works around ERR_HTTP2_PROTOCOL_ERROR seen on
-            # some sites' bot-detection layers; --disable-blink-features
-            # removes the most obvious automation fingerprint
-            # (navigator.webdriver) that basic bot checks key off.
-            args=["--disable-http2", "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-http2",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+            ],
         )
         context = await browser.new_context(
             user_agent=settings.scrape_user_agent,
@@ -187,10 +211,20 @@ async def scrape_product_page(url: str) -> ScrapedProductData:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
+
+
+        await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined
+        });
+        """)
         page = await context.new_page()
+        page.set_default_timeout(settings.scrape_timeout_ms)
+        page.set_default_navigation_timeout(settings.scrape_timeout_ms)
 
         try:
             await _goto_with_retries(page, url)
+            
         except Exception as exc:
             await context.close()
             await browser.close()
