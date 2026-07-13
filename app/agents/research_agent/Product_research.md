@@ -83,7 +83,7 @@ To improve reliability, the scraper was hardened with several defensive
 measures while preserving the existing extraction pipeline:
 
 - Disabled HTTP/2 (`--disable-http2`) to avoid protocol-level connection
-  failures observed on some requests.
+failures observed on some requests.
 - Reduced obvious automation fingerprints using
   `--disable-blink-features=AutomationControlled` and overriding
   `navigator.webdriver` before any page scripts execute.
