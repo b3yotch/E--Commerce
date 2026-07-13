@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     groq_temperature: float = 0.7  # creative task, not extraction - allow more variance than Ollama's 0.2
 
     # Scraper
+    # Scraper
     scrape_timeout_ms: int = 30000
     scrape_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -37,6 +38,8 @@ class Settings(BaseSettings):
     )
     max_visible_text_chars: int = 20000
     max_review_text_chars: int = 8000
+    min_review_text_chars: int = 200  # below this, review_text counts as "not really found" - triggers scroll escalation
+    review_wait_timeout_ms: int = 5000  # how long to wait for a review selector to appear after scrolling
 
     # Agent
     max_extraction_retries: int = 2

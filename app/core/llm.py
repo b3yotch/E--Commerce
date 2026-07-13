@@ -36,6 +36,78 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+def _example_from_json_schema(node: dict, defs: dict) -> object:
+    """
+    Recursively build one plausible placeholder value for a JSON-schema
+    node, resolving $ref/$defs (nested Pydantic sub-models) and
+    anyOf/Optional wrapping along the way. Used to build a flat, filled
+    *instance* of a schema rather than handing a smaller model the raw
+    schema definition - see _build_example_json's docstring for why that
+    distinction actually matters here, not just cosmetically.
+    """
+    if "$ref" in node:
+        ref_name = node["$ref"].split("/")[-1]
+        return _example_from_json_schema(defs[ref_name], defs)
+
+    if "anyOf" in node:
+        for option in node["anyOf"]:
+            if option.get("type") != "null":
+                return _example_from_json_schema(option, defs)
+        return None
+
+    node_type = node.get("type")
+
+    if node_type == "object":
+        if "properties" in node:
+            return {
+                name: _example_from_json_schema(prop, defs)
+                for name, prop in node["properties"].items()
+            }
+        if isinstance(node.get("additionalProperties"), dict):
+            # dict[str, X] fields (e.g. `specifications: dict[str, str]`)
+            return {"example_key": _example_from_json_schema(node["additionalProperties"], defs)}
+        return {}
+
+    if node_type == "array":
+        return [_example_from_json_schema(node.get("items", {}), defs)]
+
+    if node_type == "string":
+        hint = node.get("description") or node.get("title") or "value"
+        return f"<{hint[:60]}>"
+
+    if node_type == "integer":
+        return 1
+
+    if node_type == "number":
+        return 1.0
+
+    if node_type == "boolean":
+        return True
+
+    return None
+
+
+def _build_example_json(schema: Type[BaseModel]) -> str:
+    """
+    Build a filled-shape example instance from a Pydantic schema, instead of
+    handing the model the raw JSON Schema. qwen3.5 (and likely other small
+    models) sometimes echo the schema *definition* back verbatim -
+    `properties`/`type`/`description` keys with real values nested inside
+    `properties` - rather than returning a flat filled instance, because to a
+    smaller model the schema definition and a filled instance look
+    structurally similar. Showing a concrete example with placeholder values
+    (not the schema metadata) removes that ambiguity entirely: there's no
+    `properties` key for the model to imitate.
+
+    Generic on purpose - this is used for every schema across every agent,
+    not hand-written per schema, so a new agent gets this fix for free.
+    """
+    schema_dict = schema.model_json_schema()
+    defs = schema_dict.get("$defs", {})
+    example = _example_from_json_schema(schema_dict, defs)
+    return json.dumps(example, indent=2)
+
+
 def _extract_json_object(text: str) -> str:
     """
     Best-effort extraction of a single JSON object from model output that may
@@ -90,13 +162,24 @@ async def structured_chat(
     (2048-4096 depending on version) is unrelated to a model's advertised
     max context, and research prompts here (up to ~20k chars of page text +
     8k of review text) will silently get truncated without this.
+
+    Shows a filled-shape EXAMPLE instance in the prompt, not the raw JSON
+    Schema - qwen3.5 (and likely other small models) will otherwise
+    sometimes echo the schema definition back verbatim (`properties`/`type`/
+    `description` keys, real values nested inside `properties`) instead of
+    returning a flat filled instance, since the two look structurally
+    similar to a smaller model. See _build_example_json's docstring.
     """
     client = ollama.AsyncClient(host=settings.ollama_host)
 
     schema_hint = (
         "\n\nRespond with ONLY a single JSON object - no markdown code fences, "
-        "no commentary before or after it - matching exactly this JSON schema:\n"
-        f"{json.dumps(schema.model_json_schema(), indent=2)}"
+        "no commentary before or after it. Here is the exact shape to return, "
+        "with placeholder values showing what kind of content belongs in each "
+        "field - replace every placeholder with real content, and do not "
+        "return this structure with the placeholders still in it, and do not "
+        "return a JSON Schema definition (no 'properties'/'type' keys):\n"
+        f"{_build_example_json(schema)}"
     )
 
     response = await client.chat(

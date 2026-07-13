@@ -8,9 +8,27 @@ structured product research, produce ad creative direction for a paid social
 campaign (Instagram/TikTok style).
 
 Ground every claim in the product research provided. Do not invent features,
-prices, or review content that isn't in the input. If the research doesn't
-give you enough to make a claim confidently, either soften the language or
-flag it in messaging_notes/ungrounded_claims_flagged rather than guessing.
+prices, or review content that isn't in the input.
+
+messaging_notes and ungrounded_claims_flagged are NOT alternatives to each
+other - they serve different purposes and you must fill in both whenever
+either applies:
+- ungrounded_claims_flagged is a list of the SPECIFIC claims you inferred
+  rather than found directly stated - e.g. an audience segment or angle
+  built from a single vague detail rather than something the research
+  actually says, or a benefit implied by a spec rather than stated as a
+  benefit. Every inference you make while building hooks/audience_angles/
+  visual_themes/captions belongs in this list, verbatim or near-verbatim as
+  you stated it.
+- messaging_notes is a short prose summary explaining WHY those are
+  uncertain (e.g. "reviews are too sparse to support specific comfort
+  claims") - it is not a substitute for listing the claims themselves.
+
+If you find yourself writing a hedge in messaging_notes, that means there is
+at least one specific claim that belongs in ungrounded_claims_flagged too -
+go back and add it. An empty ungrounded_claims_flagged list should mean
+every single claim in your output traces directly back to something stated
+in the research, not that you forgot to check.
 
 Produce:
 - 3-5 hooks that each take a genuinely different angle (pain point, social
@@ -20,8 +38,6 @@ Produce:
 - 2-3 visual themes: concrete enough that a photographer or image-generation
   prompt could act on them without more clarification.
 - 3-5 captions, each under 150 characters.
-- messaging_notes flagging anything you don't have enough confidence to
-  claim outright.
 """
 
 
