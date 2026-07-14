@@ -61,9 +61,37 @@ def _extract_og_image(soup: BeautifulSoup) -> str | None:
 
 
 def _extract_visible_text(soup: BeautifulSoup, max_chars: int) -> str:
-    """Strip script/style/nav/footer noise and return trimmed body text."""
-    for element in soup(["script", "style", "nav", "footer", "svg", "noscript"]):
-        element.decompose()
+    """
+    Strip page chrome and return trimmed body text.
+
+    The original noise list only caught semantic tags (nav/footer/script/
+    style/svg/noscript). In practice, most real ecommerce sites put their
+    actual chrome - cookie consent banners, breadcrumb trails, mega-menus,
+    newsletter signup blocks, mobile slide-out menus - in plain <div>s
+    identified by class/id/role, not semantic tags at all, so none of that
+    was being stripped. This directly bloats the prompt handed to the LLM:
+    that noise is pure token cost with zero extraction signal, and prefill
+    time scales with input length, so cutting it shrinks Ollama latency
+    without touching config or hardware.
+
+    Broadened to catch the common patterns above via attribute-contains
+    selectors. Best-effort, not exhaustive - a site with unusual markup will
+    still leak some chrome through, same caveat as REVIEW_SELECTORS below.
+    """
+    noise_selectors = [
+        "script", "style", "nav", "footer", "svg", "noscript",
+        "header", "aside", "form", "iframe",
+        "[class*='cookie']", "[id*='cookie']",
+        "[class*='banner']",
+        "[class*='breadcrumb']", "[id*='breadcrumb']",
+        "[class*='newsletter']",
+        "[class*='menu']", "[id*='menu']",
+        "[role='navigation']", "[role='banner']", "[role='contentinfo']",
+        "[aria-hidden='true']",
+    ]
+    for selector in noise_selectors:
+        for element in soup.select(selector):
+            element.decompose()
 
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)

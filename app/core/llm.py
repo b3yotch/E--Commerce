@@ -189,6 +189,7 @@ async def structured_chat(
             {"role": "user", "content": user_prompt},
         ],
         think=False,
+        keep_alive="30m",
         options={
             "temperature": temperature,
             "num_ctx": settings.ollama_num_ctx,
