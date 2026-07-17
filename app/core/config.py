@@ -29,7 +29,23 @@ class Settings(BaseSettings):
     groq_max_tokens: int = 2048
     groq_temperature: float = 0.7  # creative task, not extraction - allow more variance than Ollama's 0.2
 
-    # Scraper
+    # Groq (Prompt Generation Agent - translating CreativeDirection.visual_themes
+    # into ComfyUI-ready image/video prompts). Deliberately its OWN settings
+    # block, separate from Creative Strategy's groq_* fields above, even
+    # though the placeholder values currently match: writing prompts a
+    # diffusion/video model responds well to is a different skill from ad
+    # copywriting, so model choice here needs its own 2-3 candidate
+    # comparison before these placeholders should be trusted - don't assume
+    # they should track Creative Strategy's models just because they started
+    # out equal.
+    prompt_gen_primary_model: str = "openai/gpt-oss-120b"  # placeholder - re-run comparison before trusting
+    prompt_gen_fallback_model: str = "llama-3.3-70b-versatile"
+    prompt_gen_max_tokens: int = 2048
+    # Lower than Creative Strategy's 0.7 - prompt-writing benefits from more
+    # precision/consistency than open-ended ad copy, but still needs some
+    # variation across 2-3 distinct visual themes per product.
+    prompt_gen_temperature: float = 0.6
+
     # Scraper
     scrape_timeout_ms: int = 30000
     scrape_user_agent: str = (
@@ -44,6 +60,7 @@ class Settings(BaseSettings):
     # Agent
     max_extraction_retries: int = 2
     max_creative_retries: int = 2
+    max_prompt_gen_retries: int = 2
 
 
 settings = Settings()
