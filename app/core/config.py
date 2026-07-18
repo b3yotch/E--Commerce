@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     # comparison before these placeholders should be trusted - don't assume
     # they should track Creative Strategy's models just because they started
     # out equal.
-    prompt_gen_primary_model: str = "openai/gpt-oss-120b"  # placeholder - re-run comparison before trusting
-    prompt_gen_fallback_model: str = "llama-3.3-70b-versatile"
+    prompt_gen_primary_model: str = "llama-3.3-70b-versatile"  # placeholder - re-run comparison before trusting
+    prompt_gen_fallback_model: str = "openai/gpt-oss-120b"
     prompt_gen_max_tokens: int = 2048
     # Lower than Creative Strategy's 0.7 - prompt-writing benefits from more
     # precision/consistency than open-ended ad copy, but still needs some
@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Scraper
     scrape_timeout_ms: int = 30000
+    nav_attempt_timeout_ms: int = 10000
     scrape_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     max_visible_text_chars: int = 20000
     max_review_text_chars: int = 8000
     min_review_text_chars: int = 200  # below this, review_text counts as "not really found" - triggers scroll escalation
-    review_wait_timeout_ms: int = 5000  # how long to wait for a review selector to appear after scrolling
+    review_wait_timeout_ms: int = 4000  # how long to wait for a review selector to appear after scrolling
 
     # Agent
     max_extraction_retries: int = 2

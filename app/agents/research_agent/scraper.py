@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -61,37 +62,9 @@ def _extract_og_image(soup: BeautifulSoup) -> str | None:
 
 
 def _extract_visible_text(soup: BeautifulSoup, max_chars: int) -> str:
-    """
-    Strip page chrome and return trimmed body text.
-
-    The original noise list only caught semantic tags (nav/footer/script/
-    style/svg/noscript). In practice, most real ecommerce sites put their
-    actual chrome - cookie consent banners, breadcrumb trails, mega-menus,
-    newsletter signup blocks, mobile slide-out menus - in plain <div>s
-    identified by class/id/role, not semantic tags at all, so none of that
-    was being stripped. This directly bloats the prompt handed to the LLM:
-    that noise is pure token cost with zero extraction signal, and prefill
-    time scales with input length, so cutting it shrinks Ollama latency
-    without touching config or hardware.
-
-    Broadened to catch the common patterns above via attribute-contains
-    selectors. Best-effort, not exhaustive - a site with unusual markup will
-    still leak some chrome through, same caveat as REVIEW_SELECTORS below.
-    """
-    noise_selectors = [
-        "script", "style", "nav", "footer", "svg", "noscript",
-        "header", "aside", "form", "iframe",
-        "[class*='cookie']", "[id*='cookie']",
-        "[class*='banner']",
-        "[class*='breadcrumb']", "[id*='breadcrumb']",
-        "[class*='newsletter']",
-        "[class*='menu']", "[id*='menu']",
-        "[role='navigation']", "[role='banner']", "[role='contentinfo']",
-        "[aria-hidden='true']",
-    ]
-    for selector in noise_selectors:
-        for element in soup.select(selector):
-            element.decompose()
+    """Strip script/style/nav/footer noise and return trimmed body text."""
+    for element in soup(["script", "style", "nav", "footer", "svg", "noscript"]):
+        element.decompose()
 
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
@@ -124,43 +97,35 @@ async def _goto_with_retries(page, url: str) -> None:
     response - it's not a timeout, so retrying with the same strategy usually
     just reproduces it immediately. We vary wait_until strategy and back off
     briefly between attempts instead of retrying identically.
+
+    Each attempt gets a short timeout (`nav_attempt_timeout_ms`), not the
+    full `scrape_timeout_ms` - the whole point of trying multiple strategies
+    is to fail fast and move to the next one, not have each attempt burn the
+    entire budget before we even get to try a fallback. `scrape_timeout_ms`
+    is enforced as a ceiling across the *whole* sequence instead: once
+    elapsed time crosses it, we stop trying further strategies rather than
+    starting one we don't have budget left to finish.
     """
-
-    # Set headers once
-    await page.set_extra_http_headers({
-        "Referer": "https://www.google.com/",
-        "Upgrade-Insecure-Requests": "1",
-    })
-
-    strategies = [
-        ("networkidle", 3000),
-        ("domcontentloaded", 2000),
-        ("commit", 2000),
-    ]
-
+    strategies = ["domcontentloaded", "commit"]
     last_error: Exception | None = None
+    start = time.monotonic()
 
-    for attempt, (wait_until, extra_wait) in enumerate(strategies):
+    for attempt, wait_until in enumerate(strategies):
+        elapsed_ms = (time.monotonic() - start) * 1000
+        remaining_ms = settings.scrape_timeout_ms - elapsed_ms
+        if remaining_ms <= 0:
+            break
+
+        attempt_timeout_ms = min(settings.nav_attempt_timeout_ms, remaining_ms)
         try:
-            await page.goto(
-                url,
-                timeout=settings.scrape_timeout_ms,
-                wait_until=wait_until,
-            )
-
-            # Give React/SPA apps time to hydrate
-            await page.wait_for_timeout(extra_wait)
-
+            await page.goto(url, timeout=attempt_timeout_ms, wait_until=wait_until)
             return
-
         except Exception as exc:  # noqa: BLE001
             last_error = exc
-
             if attempt < len(strategies) - 1:
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(800)
 
-    raise last_error
-    
+    raise last_error  # type: ignore[misc]
 
 
 def _review_count_hint(json_ld_product: dict | None) -> int | None:
@@ -199,8 +164,8 @@ async def _scroll_to_trigger_lazy_content(page) -> None:
         height = await page.evaluate("document.body.scrollHeight")
         steps = 6
         for i in range(1, steps + 1):
-            await page.mouse.wheel(0, height // steps)
-            await page.wait_for_timeout(700)
+            await page.evaluate(f"window.scrollTo(0, {height} * {i} / {steps})")
+            await page.wait_for_timeout(400)
         await page.evaluate("window.scrollTo(0, 0)")  # back to top, tidy but not required
     except Exception:
         pass
@@ -223,12 +188,11 @@ async def scrape_product_page(url: str) -> ScrapedProductData:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=[
-                "--disable-http2",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-            ],
+            # --disable-http2 works around ERR_HTTP2_PROTOCOL_ERROR seen on
+            # some sites' bot-detection layers; --disable-blink-features
+            # removes the most obvious automation fingerprint
+            # (navigator.webdriver) that basic bot checks key off.
+            args=["--disable-http2", "--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
             user_agent=settings.scrape_user_agent,
@@ -239,20 +203,10 @@ async def scrape_product_page(url: str) -> ScrapedProductData:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
-
-
-        await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined
-        });
-        """)
         page = await context.new_page()
-        page.set_default_timeout(settings.scrape_timeout_ms)
-        page.set_default_navigation_timeout(settings.scrape_timeout_ms)
 
         try:
             await _goto_with_retries(page, url)
-            
         except Exception as exc:
             await context.close()
             await browser.close()
