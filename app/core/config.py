@@ -64,4 +64,29 @@ class Settings(BaseSettings):
     max_prompt_gen_retries: int = 2
 
 
+    comfyui_server: str = "http://127.0.0.1:8188"
+    comfyui_checkpoint: str = "juggernautXL_ragnarok.safetensors"
+    comfyui_steps: int = 20
+    comfyui_cfg: float = 7.0
+    comfyui_sampler: str = "dpmpp_2m_sde"
+    comfyui_scheduler: str = "karras"
+    comfyui_batch_size: int = 5  # NOTE: no longer read by nodes.py directly - superseded by total_images_per_product below, left here only if you call build_image_workflow() manually elsewhere
+    comfyui_generation_timeout_seconds: float = 180.0  # bounds wait_for_completion - was previously unbounded
+ 
+    # Total images for the WHOLE product, split across however many themes
+    # it has via distribute_total() in utils.py - e.g. 5 images / 2 themes
+    # -> [3, 2]. Previously comfyui_batch_size was applied per theme
+    # (5 + 5 = 10 for a 2-theme product); this is the fix for that.
+    total_images_per_product: int = 5
+ 
+    # Where generated images get COPIED to, out of ComfyUI's own output/ dir
+    # and into this project - relative to wherever the process runs from,
+    # same as the existing `outputs/` dir test_full_pipeline_live.py already
+    # writes JSON results to. Adjust to an absolute path if you'd rather
+    # pin it regardless of cwd.
+    image_output_dir: str = "outputs/generated_images"
+ 
+    # Agent
+    max_image_gen_retries: int = 2  # same default as Agents 1-3's retry ceilings
+ 
 settings = Settings()

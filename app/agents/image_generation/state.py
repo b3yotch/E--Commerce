@@ -42,15 +42,6 @@ class ImageGenerationState(TypedDict, total=False):
     retries: int
     error: str | None
     current_seed: int | None
-    # Bug fix: this was previously used in nodes.py but never declared here.
-    # LangGraph only carries forward state keys that exist in this TypedDict
-    # schema - any node return value outside it is silently dropped between
-    # steps. Without this line, generate_node's _pending_result never
-    # reached validate_node, so validation always saw "no result" regardless
-    # of whether generation actually succeeded - retrying and eventually
-    # skipping every theme even though images were generated and saved to
-    # disk correctly on the very first attempt each time.
-    _pending_result: ThemeGenerationResult | None
 
     # Final output, assembled once every theme is done - "images" continues
     # the research/creative/prompts/images naming pattern.
