@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # which is the binding constraint for bulk batches - not TPM.
     groq_api_key: str = ""
     groq_primary_model: str = "openai/gpt-oss-120b"
-    groq_fallback_model: str = "llama-3.3-70b-versatile"
+    groq_fallback_model: str = "openai/gpt-oss-20b"
     groq_max_tokens: int = 2048
     groq_temperature: float = 0.7  # creative task, not extraction - allow more variance than Ollama's 0.2
 
@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     # comparison before these placeholders should be trusted - don't assume
     # they should track Creative Strategy's models just because they started
     # out equal.
-    prompt_gen_primary_model: str = "llama-3.3-70b-versatile"  # placeholder - re-run comparison before trusting
-    prompt_gen_fallback_model: str = "openai/gpt-oss-120b"
+    prompt_gen_primary_model: str = "openai/gpt-oss-120b"  # placeholder - re-run comparison before trusting
+    prompt_gen_fallback_model: str = "openai/gpt-oss-20b"
     prompt_gen_max_tokens: int = 2048
     # Lower than Creative Strategy's 0.7 - prompt-writing benefits from more
     # precision/consistency than open-ended ad copy, but still needs some
