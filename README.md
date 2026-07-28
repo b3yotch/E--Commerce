@@ -143,6 +143,20 @@ are deterministic ComfyUI workflow configuration that belongs to Agent 4,
 not something an LLM should be guessing at. See `Prompt_generation.md`
 Challenge 1.
 
+**Video prompts are now shaped around a confirmed target model:**
+image-to-video generation via `NimVideo/cogvideox-2b-img2vid`, a community
+fine-tune of CogVideoX-2B (there's no official THUDM CogVideoX-2B
+image-to-video release - only 5B-I2V exists upstream). Two schema
+consequences followed directly from that: `VideoGenerationPrompt` no longer
+has a `duration_seconds` field - this checkpoint's output length (6s at
+8fps, fixed) is a property of the checkpoint itself, not a generation
+parameter an LLM should be choosing, the same reasoning that already kept
+sampler settings out of `ImageGenerationPrompt`. And `base_prompt` is now
+explicitly prompted to stay dense and verbose - CogVideoX was trained on
+long, detailed captions, not short ones - with a length check added to
+`validate_node` to catch a prompt likely to exceed the text encoder's
+~226-token ceiling before it silently truncates at generation time.
+
 ## Setup
 
 ```bash
@@ -298,10 +312,13 @@ Worth understanding rather than just accepting the defaults:
   chosen via a real 2-3 candidate comparison against sample
   `CreativeDirection` inputs. Worth running before trusting it - see
   `Prompt_generation.md`.
-- **ComfyUI workflow-specific video conditioning** (Agent 3):
-  `motion_description` is written in general cinematography language,
-  independent of which actual video workflow (AnimateDiff, SVD, etc.) Agent
-  4 will run. May need workflow-specific fields once that's settled.
+- **Image/video aspect ratio mismatch** (Agents 3 & 4, to resolve when the
+  video generation agent is built): `ImageGenerationPrompt.aspect_ratio` is
+  chosen per-theme for social framing (e.g. `4:5`, `9:16`), but the
+  confirmed video target (`NimVideo/cogvideox-2b-img2vid`) has a fixed
+  720x480 landscape output. Whichever generated image ends up selected as a
+  video's source frame will need reconciling with that fixed resolution -
+  resize/letterbox vs. crop - not yet decided.
 - **LangGraph HITL / persistence / streaming-to-UI**: none implemented at
   any agent's level. Persistence belongs at the bulk-processing job-queue
   layer (resume a crashed batch without re-paying for completed LLM calls);

@@ -62,10 +62,24 @@ class ImageGenerationPrompt(BaseModel):
 
 
 class VideoGenerationPrompt(BaseModel):
-    """One video prompt - motion/camera direction layered on the visual description."""
+    """
+    One video prompt for image-to-video generation. No duration/resolution/fps
+    fields here on purpose: unlike a text-to-video model, an image-to-video
+    checkpoint's output length and resolution are fixed by the checkpoint
+    itself (see cogvideox_* settings in Settings), not real generation
+    parameters an LLM should be choosing - the same reasoning that keeps
+    sampler settings out of ImageGenerationPrompt.
+    """
 
     base_prompt: str = Field(
-        description="Visual description, same conventions as ImageGenerationPrompt.positive_prompt."
+        description=(
+            "Dense, verbose scene description in English - the video model "
+            "this feeds (CogVideoX-family) was trained on long, detailed "
+            "captions, so don't compress this the way you might for a "
+            "shorter-context model. Keep it under roughly 200 words - the "
+            "text encoder has a practical ceiling (~226 tokens) and anything "
+            "past it risks silent truncation."
+        )
     )
     motion_description: str = Field(
         description=(
@@ -73,14 +87,6 @@ class VideoGenerationPrompt(BaseModel):
             "(e.g. 'slow dolly-in, subject remains still, background softly "
             "drifts') - not vague terms like 'dynamic movement'."
         )
-    )
-    duration_seconds: float = Field(
-        default=4.0,
-        description=(
-            "Target clip length in seconds. Keep short (3-6s) unless the "
-            "motion description genuinely needs more to read as intentional "
-            "rather than aimless."
-        ),
     )
     negative_prompt: str = Field(default="")
 

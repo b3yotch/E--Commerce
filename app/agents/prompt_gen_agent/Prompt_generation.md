@@ -136,6 +136,40 @@ for evaluating *this* agent's latency too: don't assume which stage owns a
 slow pipeline run without checking the per-stage timing the test scripts
 already log.
 
+### 6. Confirming the actual video model retroactively invalidated a schema field
+
+`VideoGenerationPrompt.duration_seconds` was designed against a hypothetical
+generic video model, before a real one was pinned down. Once the target was
+confirmed as `NimVideo/cogvideox-2b-img2vid` - a community image-to-video
+fine-tune of CogVideoX-2B (there's no official THUDM CogVideoX-2B I2V
+release; only 5B-I2V exists upstream) - that field turned out to be asking
+the LLM to choose something it can't actually influence: this checkpoint's
+output is fixed at 6 seconds, 8fps, 48 frames, 720x480, baked into the
+checkpoint itself, not a runtime parameter. Removed the field entirely
+rather than leaving it in as a value nothing downstream would read - same
+reasoning Challenge 1 already applied to sampler settings, just discovered
+a step later, after the consuming model was actually known instead of
+assumed.
+
+Confirming the real model also *resolved* a question in the opposite
+direction: whether `base_prompt` should stay a full dense scene description
+or shrink toward motion-only, since diffusion/video prompt conventions
+aren't uniform across models. CogVideoX was specifically trained on long,
+verbose captions, not short ones - so the dense-description approach
+already in use was right, and got reinforced in the system prompt rather
+than second-guessed, with a text-length check added to `validate_node`
+(catching anything likely to exceed the ~226-token text encoder ceiling)
+so an overlong prompt fails validation instead of silently truncating at
+generation time.
+
+**Lesson, same shape as Challenge 1 but worth restating:** a schema
+designed against an assumed downstream consumer needs re-auditing once the
+real one is confirmed - not just extended. The safe assumption when the
+consumer is unknown (leave a parameter open, let the LLM decide) can become
+the wrong one once it's known (the parameter isn't real, remove it) or get
+retroactively validated (the approach was right, reinforce it) - it won't
+be obvious which without actually checking.
+
 ## Deliberately deferred (not gaps, decisions)
 
 - **Model choice not yet validated**: `prompt_gen_primary_model` is still
@@ -148,11 +182,13 @@ already log.
   promising in live testing (different ratios and different suggested hooks
   per theme, matching composition rather than defaulting) but only observed
   across two live runs - not yet confirmed to hold at scale.
-- **ComfyUI workflow-specific video conditioning**: `motion_description` is
-  written in general cinematography language, without knowing which video
-  workflow (AnimateDiff, SVD, or otherwise) Agent 4 will actually run. May
-  need workflow-specific fields (motion strength, conditioning frames) once
-  that's settled - deferred rather than guessed at now.
+- **Image/video aspect ratio mismatch**: `ImageGenerationPrompt.aspect_ratio`
+  is chosen per-theme for social framing (`4:5`, `9:16`, etc.), but the
+  confirmed video target has a fixed 720x480 landscape output. Whichever
+  generated image ends up selected as a video's source frame will need
+  reconciling with that fixed resolution - resize/letterbox vs. crop - not
+  yet decided. Belongs to the video generation agent, not this one, but
+  noted here since it's a direct consequence of Challenge 6.
 - **Deeper prompt-quality grading**: same low-bar `validate_node` philosophy
   as Agents 1 and 2 - schema completeness only, not whether a prompt would
   actually generate something good. That's the Review/Critic agent's job,

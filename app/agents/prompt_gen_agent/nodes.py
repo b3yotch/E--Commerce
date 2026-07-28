@@ -74,6 +74,10 @@ def _missing_reasons(state: PromptGenState) -> list[str]:
             reasons.append(f"prompt_sets[{i}].video_prompt.base_prompt is empty")
         if not ps.video_prompt.motion_description.strip():
             reasons.append(f"prompt_sets[{i}].video_prompt.motion_description is empty")
+        if len(ps.video_prompt.base_prompt) > 1200:  # ~200 words / rough proxy for the
+            # ~226-token text encoder ceiling - catches an obviously oversized
+            # prompt before it silently truncates at generation time.
+            reasons.append(f"prompt_sets[{i}].video_prompt.base_prompt is too long ({len(ps.video_prompt.base_prompt)} chars, likely to truncate)")
 
     return reasons
 
