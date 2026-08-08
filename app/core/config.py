@@ -77,7 +77,16 @@ class Settings(BaseSettings):
     comfyui_video_sampler_node_id: str = "63"
     comfyui_video_save_node_id: str = "44"
 
-    comfyui_video_num_frames: int = 49
+    # Frame count IS a real runtime parameter on this checkpoint's ComfyUI
+    # sampler node, despite Prompt_generation.md Challenge 6 assuming
+    # duration was fixed by the checkpoint itself - that assumption was
+    # wrong (or at least incomplete), confirmed once this node's actual
+    # inputs were inspected. Fixed at 8fps regardless. CogVideoX's temporal
+    # VAE requires frame counts of the form 4n+1, so an exact 5.00s isn't
+    # reachable - 41 frames (5.125s) is the nearest valid value below the
+    # 49 (6.125s) used in the original hand-test; 37 (4.625s) is the next
+    # one down if you'd rather undershoot than overshoot.
+    comfyui_video_num_frames: int = 41
     comfyui_video_steps: int = 20
     comfyui_video_cfg: float = 6.0
     comfyui_video_scheduler: str = "CogVideoXDDIM"
@@ -86,18 +95,28 @@ class Settings(BaseSettings):
         "low quality, blurry, watermark, bad anatomy, distorted, "
         "flickering, artifacts"
     )
-    # Far more generous than image's 180s - a 6GB card is right at this
-    # checkpoint's VRAM edge (see chat discussion before this agent was
-    # built), and a false-timeout mid-generation is more costly to retry
-    # here than for images.
-    comfyui_video_generation_timeout_seconds: float = 1800.0
+    # UPDATED after a real measurement, not the earlier guess: one
+    # sampling step took ~186s on this RTX 3050 at 49 frames/20 steps/
+    # 720x480, i.e. ~3700s (~62min) for a full generation. 1800s
+    # guaranteed every attempt would time out before finishing - raised
+    # to a real ceiling above the observed per-run cost, with headroom.
+    # If you'd rather trade video length/quality for speed instead of
+    # accepting ~60min/video, lower comfyui_video_num_frames and/or
+    # comfyui_video_steps below instead of raising this further.
+    comfyui_video_generation_timeout_seconds: float = 4500.0
 
     # One video per theme, not a total split across themes the way
     # images use distribute_total() - see Video_generation.md Challenge 2
     # for why oversampling/batching doesn't make sense at video's cost
     # profile the way it didn't for images either (Image_generation.md
     # Challenge 2), just more so here.
-    max_video_gen_retries: int = 1  # lower than image's 2 - each retry is materially more expensive
+    # Was 1. At ~60min per attempt, a single retry now costs another hour
+    # for a theme that already failed once - worth deciding deliberately
+    # rather than inheriting image's retry count. 0 means a failed theme
+    # is skipped immediately rather than tried twice; raise back to 1 only
+    # if you have evidence failures are transient (infra blips) rather
+    # than this checkpoint genuinely being too slow/tight for this card.
+    max_video_gen_retries: int = 0
     video_output_dir: str = "outputs/generated_videos"
 
 
