@@ -7,20 +7,29 @@ prompts, on the way to generating marketing images/videos automatically.
 ## Pipeline
 
 ```
-[URL] --> Agent 1: Product Research --> Agent 2: Creative Strategy --> Agent 3: Prompt Generation --> Agent 4: Image/Video Generation (ComfyUI) --> Agent 5: Review/Critic
-              (done)                          (done)                        (done)                              (not started)                              (not started)
+[URL] --> Agent 1: Product Research --> Agent 2: Creative Strategy --> Agent 3: Prompt Generation --> Agent 4: Image Generation (ComfyUI) --> Agent 5: Video Generation (ComfyUI) --> Agent 6: Review/Critic
+              (done)                          (done)                        (done)                              (done)                                        (done)                                     (not started)
 ```
+
+Video generation was originally planned as part of a combined Agent 4
+("Image/Video Generation"), but landed as its own Agent 5 once actually
+built - see `Video_generation.md`'s intro for why that split was made
+explicit rather than drifting into whichever agent the code happened to
+get written into. That push Review/Critic from Agent 5 to Agent 6.
 
 Plus a bulk CSV processing layer (not started) for running the whole
 pipeline across many product URLs at once.
 
 Each agent is a self-contained LangGraph subgraph living in its own
 `app/agents/<name>/` folder (`schema.py`, `prompts.py`, `state.py`,
-`nodes.py`, `graph.py`), sharing common infrastructure in `app/core/`.
-Design rationale and hard-won debugging lessons for each agent are written
-up in detail in `Product_research.md`, `Creative_strategy.md`, and
-`Prompt_generation.md` - this README covers setup, running, and
-configuration; those files cover *why* things are built the way they are.
+`nodes.py`, `graph.py`), sharing common infrastructure in `app/core/` -
+except Agent 5, which deliberately owns its own `comfyui_client.py` rather
+than sharing Agent 4's (see `Video_generation.md`). Design rationale and
+hard-won debugging lessons for each agent are written up in detail in
+`Product_research.md`, `Creative_strategy.md`, `Prompt_generation.md`,
+`Image_generation.md`, and `Video_generation.md` - this README covers
+setup, running, and configuration; those files cover *why* things are
+built the way they are.
 
 ## Agent 1: Product Research
 
@@ -148,14 +157,128 @@ image-to-video generation via `NimVideo/cogvideox-2b-img2vid`, a community
 fine-tune of CogVideoX-2B (there's no official THUDM CogVideoX-2B
 image-to-video release - only 5B-I2V exists upstream). Two schema
 consequences followed directly from that: `VideoGenerationPrompt` no longer
-has a `duration_seconds` field - this checkpoint's output length (6s at
-8fps, fixed) is a property of the checkpoint itself, not a generation
-parameter an LLM should be choosing, the same reasoning that already kept
-sampler settings out of `ImageGenerationPrompt`. And `base_prompt` is now
-explicitly prompted to stay dense and verbose - CogVideoX was trained on
-long, detailed captions, not short ones - with a length check added to
+has a `duration_seconds` field, and `base_prompt` is now explicitly
+prompted to stay dense and verbose - CogVideoX was trained on long,
+detailed captions, not short ones - with a length check added to
 `validate_node` to catch a prompt likely to exceed the text encoder's
 ~226-token ceiling before it silently truncates at generation time.
+
+**Correction, discovered while building Agent 5:** the `duration_seconds`
+removal was originally justified as "this checkpoint's output length is
+fixed by the checkpoint itself, not a real parameter." That's wrong -
+`num_frames` turned out to be a plain editable input on the ComfyUI
+sampler node once the actual workflow was inspected (see
+`Video_generation.md` Challenge 3). The schema decision itself still
+stands (an LLM shouldn't be choosing this), just for a different reason:
+it's deterministic pipeline configuration that belongs to Agent 5's
+`Settings`, the same category as seed/steps/cfg - not something fixed and
+therefore moot.
+
+## Agent 4: Image Generation
+
+Takes Agent 3's `PromptGenerationOutput`, turns each `ThemePromptSet`'s
+`image_prompt` into generated images via a local ComfyUI instance
+(SDXL-family checkpoint, core ComfyUI nodes - no custom node package
+needed here, unlike Agent 5).
+
+```
+start --> generate --> validate --+--> [more themes?] --+--> advance_theme --> generate (next theme)
+             ^                    |                      |
+             |                    v                      +--> finalize --> END (all themes done)
+             +----- bump_retry <--+ (invalid, retries remain)
+                                  |
+                                  +--> advance_theme (retries exhausted - skip this theme)
+```
+
+Two loops layered on top of Agents 1-3's single retry loop: a retry loop
+(same shape as before) and a theme loop, since this agent iterates a
+variable number of visual themes (typically 2-3) within one product,
+something Agents 1-3 never needed since they each produced exactly one
+output per product.
+
+1. **start** - verifies the ComfyUI checkpoint exists on the server,
+   generates a `run_id`, and splits `total_images_per_product` across
+   however many themes this product has via `distribute_total()` (e.g. 5
+   images / 2 themes -> `[3, 2]`).
+2. **generate** (`nodes.py` + `comfyui_client.py`) - resolves
+   `aspect_ratio` to pixel dimensions (`aspect_ratio.py` - Agent 4 owns
+   this mapping, not Agent 3, since it owns the checkpoint), builds and
+   queues a ComfyUI workflow, polls to completion, and copies the
+   resulting images into this project's own output directory
+   (`<image_output_dir>/<slug>/<run_id>/theme_<n>/`).
+3. **validate** - low bar: did generation produce the expected image
+   count for this theme, not whether the images are any good.
+4. **bump_retry** - draws a **fresh random seed** on every retry, not the
+   same one - a deterministic sampler would just reproduce the exact same
+   failure otherwise.
+5. **advance_theme** - files whatever result exists, resets scratch
+   state, moves to the next theme. A theme that exhausts retries is
+   skipped entirely (absent from `theme_results`) rather than failing the
+   whole product.
+6. **finalize** - assembles `ImageGenerationOutput` once every theme has
+   been attempted.
+
+No `prompts.py` here - generation is a deterministic API call, not an LLM
+call, so there's no prompt to construct. Candidate selection ("which of
+the N images per theme is best") is deliberately **not** modeled - no
+critic exists yet (that's Agent 6's job); this agent generates candidates
+and confirms they're real, nothing more. See `Image_generation.md` for the
+full narrative, including a state-schema bug (an undeclared LangGraph
+state key silently dropping generation results between nodes) that's
+worth reading before touching Agent 5's state.py, since the same class of
+mistake was guarded against there preemptively.
+
+## Agent 5: Video Generation
+
+Takes Agent 3's `PromptGenerationOutput` (for `video_prompt` per theme)
+**and** Agent 4's `ImageGenerationOutput` (for the source frame per
+theme) - the only agent in this pipeline that consumes two upstream
+outputs at once, since image-to-video generation needs both a prompt and
+a starting image. Runs `NimVideo/cogvideox-2b-img2vid` through a custom
+ComfyUI node package (not core nodes, unlike Agent 4).
+
+```
+start --> generate --> validate --+--> [more themes?] --+--> advance_theme --> generate (next theme)
+             ^                    |                      |
+             |                    v                      +--> finalize --> END (all themes done)
+             +----- bump_retry <--+ (invalid, retries remain)
+                                  |
+                                  +--> advance_theme (retries exhausted - skip this theme)
+```
+
+Same two-loop shape as Agent 4, deliberately - one video per theme, no
+batching (video's per-generation cost doesn't reward it the way cheap
+image batches did).
+
+1. **start** - loads the API-format ComfyUI workflow JSON once (fails
+   loudly if it's the wrong export format - see `Video_generation.md`
+   Challenge 1) and generates a `run_id`, same convention as Agent 4.
+2. **generate** (`nodes.py` + `video_comfyui_client.py`, which subclasses
+   Agent 4's `ComfyUIClient` rather than duplicating or editing it) -
+   picks a source image for the current theme (currently
+   `theme_result.images[0]` - a placeholder, since no critic exists yet
+   to pick a real "best" candidate), uploads it back to ComfyUI, builds
+   and queues the video workflow, polls to completion, and saves the
+   result under `<video_output_dir>/<slug>/<run_id>/theme_<n>/`. A theme
+   with no usable Agent 4 image (that theme was itself skipped upstream)
+   is recorded as an explicit `skipped_no_source_image` result rather
+   than burning a retry on something retrying can't fix.
+3. **validate** - lowest bar of any agent so far: did `generate_node`
+   produce a result at all (success or explicit skip) - there's no
+   "count" to check, it's always exactly one video or nothing.
+4. **bump_retry** - same fresh-seed-per-retry logic as Agent 4, but
+   defaults to **0** retries, not 2 - a real generation attempt on
+   6GB VRAM costs minutes, not seconds, so a "free" retry isn't free here.
+5. **advance_theme / finalize** - same shape as Agent 4.
+
+Building this agent surfaced two real bugs in how ComfyUI was being
+talked to, not just new agent logic: ComfyUI's HTTP server can't service
+*any* request while synchronously blocked on a GPU sampling step (broke
+both image uploads and this agent's own polling loop), and a defensive
+"clear any stuck job" call ended up killing jobs that were still
+legitimately running and about to succeed. Both are written up in full in
+`Video_generation.md` Challenges 4 and 5 - worth reading before assuming
+similar defensive cleanup calls are safe elsewhere in this pipeline.
 
 ## Setup
 
@@ -175,11 +298,36 @@ OLLAMA_RESEARCH_MODEL=qwen3.5:4b
 
 # Agents 2 & 3 - Groq (cloud)
 GROQ_API_KEY=your-key-here
+
+# Agents 4 & 5 - ComfyUI (local)
+COMFYUI_SERVER=http://127.0.0.1:8188
 ```
 
 ```bash
 ollama pull qwen3.5:4b
 ```
+
+**Agent 4** needs a local ComfyUI instance running with the
+`juggernautXL_ragnarok.safetensors` checkpoint (or whatever
+`comfyui_checkpoint` points at) installed.
+
+**Agent 5** needs, on top of that:
+- `NimVideo/cogvideox-2b-img2vid` downloaded (e.g. via `huggingface-cli`)
+  and the matching custom ComfyUI node package cloned - this checkpoint
+  does **not** run on core ComfyUI nodes, unlike Agent 4's.
+- The workflow exported in **API format**, not the UI-canvas format most
+  ComfyUI workflow downloads ship as (Settings -> enable Dev Mode -> load
+  the workflow -> "Save (API Format)", a different button from plain
+  "Save"). Loading the wrong format fails loudly at Agent 5's `start_node`
+  rather than silently misbehaving.
+- That exported JSON placed at whatever `comfyui_video_workflow_json`
+  points at (default `workflows/cogvideox-2b-img2vid-workflow-API.json`,
+  relative to wherever the process is run from).
+- A GPU with enough VRAM to actually finish a generation before
+  `comfyui_video_generation_timeout_seconds` elapses - see
+  `Video_generation.md` Challenge 2 for real measured numbers on a 6GB
+  card at different frame counts. This checkpoint is meaningfully heavier
+  than Agent 4's SDXL-family checkpoint.
 
 Groq's free tier is enough to develop against (1K requests/day per model as
 of writing - see `Creative_strategy.md` Challenge 1 for why that's not
@@ -215,10 +363,12 @@ python scripts/test_pipeline_live.py https://example-store.com/products/some-wid
 ```
 
 ```bash
-# All three agents chained - tests the full research-to-prompts handoff
+# All five agents chained - tests the full research-to-video handoff
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --research-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --creative-only
+python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --prompts-only
+python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --images-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --save
 ```
 
@@ -227,7 +377,12 @@ or exhausted retries at whichever stage failed). Each stage prints its
 elapsed time and retry count separately - useful for figuring out which
 stage actually owns a slow run rather than guessing (see
 `Prompt_generation.md` Challenge 5, where scrape latency was initially
-mis-attributed to Agent 1's local model).
+mis-attributed to Agent 1's local model). `--images-only` is worth reaching
+for by default while iterating on Agent 5 specifically - video generation
+is by a wide margin the slowest stage in this pipeline (see
+`Video_generation.md` Challenge 2 for how much slower, in real measured
+numbers), and re-running Agents 1-4 every time is pure waste while
+debugging Agent 5 alone.
 
 ## Configuration notes
 
