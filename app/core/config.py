@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     max_image_gen_retries: int = 2
 
     # ---------------------------------------------------------------
-    # ComfyUI - video (Agent 5: NimVideo/cogvideox-2b-img2vid, run
+    # ComfyUI - video (Agent 6: NimVideo/cogvideox-2b-img2vid, run
     # through a custom node graph, not core ComfyUI nodes - see
     # Video_generation.md Challenge 1 for why). Node IDs below are
     # pinned to the specific exported API-format workflow JSON that
@@ -118,6 +118,49 @@ class Settings(BaseSettings):
     # than this checkpoint genuinely being too slow/tight for this card.
     max_video_gen_retries: int = 0
     video_output_dir: str = "outputs/generated_videos"
+
+    # ---------------------------------------------------------------
+    # Image Selection (Critic) Agent - Agent 5, runs between Agent 4 and
+    # Agent 6 (Video Generation). Vision model is hosted (Groq) rather
+    # than local: the RTX 3050 is already committed to ComfyUI for
+    # image/video generation, and this is one of the lowest-volume,
+    # highest-consequence judgments in the pipeline - not a place to save
+    # cost with a weaker local model.
+    #
+    # image_selection_model is a Groq PREVIEW model as of this writing -
+    # Groq's vision lineup has changed more than once already (Llama 4
+    # Scout/Maverick vision were deprecated). Confirmed against Groq's own
+    # docs: qwen/qwen3.6-27b caps at 5 images/request, 20MB max size,
+    # 2048 tokens per image - image_selection_max_images_per_call below
+    # matches that limit as of this writing, but re-verify if the model
+    # changes again.
+    # ---------------------------------------------------------------
+    image_selection_model: str = "qwen/qwen3.6-27b"
+    # Lowered from 2048: this org's on-demand tier caps qwen/qwen3.6-27b at
+    # 1000 output tokens/minute, and Groq's own estimate for a 2048-token
+    # budget against the 5-candidate schema (1347 estimated) already
+    # exceeded that. 800 leaves margin under the cap; if responses start
+    # getting truncated (invalid/incomplete JSON) rather than rate-limited,
+    # that's a sign the rubric or candidate count needs trimming instead of
+    # raising this back up, since raising it re-triggers the 429.
+    image_selection_max_tokens: int = 800
+    image_selection_temperature: float = 0.2
+    # Below this score, the pick is still made (Agent 5 needs one image per
+    # theme regardless) but flagged "selected_below_threshold" rather than
+    # "selected" - see image_selection_agent/schema.py.
+    image_selection_score_threshold: int = 55
+    max_image_selection_retries: int = 2
+    # An immediate retry inside the same one-minute OTPM window as a
+    # rate-limited call is guaranteed to hit the same limit again - this is
+    # how long select_node waits before retrying specifically after a
+    # LLMRateLimitError (not other failures), a few seconds past 60s to
+    # clear the window with margin.
+    image_selection_rate_limit_backoff_seconds: float = 65.0
+    # Some Groq vision models cap images-per-request; this has changed
+    # before and will likely change again, so it's a config value rather
+    # than hardcoded in nodes.py. Verify against the current model's actual
+    # limit rather than trusting this default.
+    image_selection_max_images_per_call: int = 5
 
 
 settings = Settings()

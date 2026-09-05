@@ -1,5 +1,5 @@
 """
-Node functions for the Video Generation Agent.
+Node functions for the Video Generation Agent (Agent 6).
 
 Retry loop and fresh-seed-per-retry decision mirror Agent 4's nodes.py
 exactly, same reasoning: a deterministic sampler means a same-seed retry
@@ -7,12 +7,20 @@ only helps for pure infrastructure flakiness, not a real generation
 failure, so a fresh seed is drawn on every retry.
 
 One new case Agent 4 never had to handle: a theme can arrive here with NO
-usable Agent 4 image at all, if that theme exhausted ITS retries upstream
-and was skipped (Image_generation.md Challenge 3). That's not a
-generation failure - retrying a video job with no source image can't
-possibly succeed - so it's handled as an immediate, retry-free "skip" in
-generate_node itself, not left to burn through max_video_gen_retries
-attempts for no reason.
+usable source image at all. Two distinct upstream causes collapse into the
+same outcome here: either the theme exhausted ITS retries in Agent 4 and
+was skipped there (Image_generation.md Challenge 3, so it never appears in
+Agent 5's output at all), or Agent 5 itself had nothing valid to select
+from after its own deterministic filter and recorded an empty
+selected_local_path (Image_selection.md). Either way, retrying a video job
+with no source image can't possibly succeed - so it's handled as an
+immediate, retry-free "skip" in generate_node itself, not left to burn
+through max_video_gen_retries attempts for no reason.
+
+No more _pick_source_image placeholder here - that was this file's own
+"revisit once a critic exists" marker, and Agent 5 (Image Selection) is
+that critic. This file now trusts Agent 5's selected_local_path directly
+rather than reaching into a candidate list and taking images[0] itself.
 """
 
 from __future__ import annotations
@@ -23,7 +31,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.agents.image_generation.utils import slugify_url, new_run_id
-from app.agents.image_generation.schema import ImageGenerationOutput, ThemeGenerationResult
+from app.agents.image_selection_agent.schema import ImageSelectionOutput, ThemeSelectionResult
 from app.agents.video_generation.video_comfyui_client import VideoComfyUIClient, ComfyUIError
 from app.agents.video_generation.schema import GeneratedVideo, ThemeVideoResult, VideoGenerationOutput
 from app.agents.video_generation.state import VideoGenerationState
@@ -36,22 +44,28 @@ def _current_theme(state: VideoGenerationState):
     return prompt_sets[state.get("current_theme_index", 0)]
 
 
-def _find_source_image_theme(state: VideoGenerationState, source_setting: str) -> ThemeGenerationResult | None:
-    images: ImageGenerationOutput = state["images"]
-    for theme_result in images.theme_results:
+def _find_source_theme(state: VideoGenerationState, source_setting: str) -> ThemeSelectionResult | None:
+    """
+    Looks up this theme's already-judged selection from Agent 5's output,
+    matched by source_setting - same matching convention used throughout
+    this pipeline (Agent 4 -> Agent 5 -> Agent 6 all echo source_setting
+    verbatim so results can be traced back to their origin theme without
+    relying on list position staying aligned).
+
+    Returns None only when the theme is missing from Agent 5's output
+    entirely - which only happens if Agent 4 skipped it upstream (Agent 5
+    loops over whatever Agent 4 produced, so a theme absent from Agent 4's
+    output is absent from Agent 5's too). A theme Agent 5 DID process, but
+    found nothing valid to select for, still shows up here with a
+    ThemeSelectionResult - just one whose selected_local_path is empty
+    (see Image_selection.md) - so that case is handled in generate_node,
+    not here.
+    """
+    selection: ImageSelectionOutput = state["selection"]
+    for theme_result in selection.theme_results:
         if theme_result.source_setting == source_setting:
             return theme_result
-    return None  # that theme was skipped entirely by Agent 4 (retries exhausted there)
-
-
-def _pick_source_image(theme_result: ThemeGenerationResult):
-    """
-    PLACEHOLDER SELECTION - see schema.py's module docstring. Agent 4
-    keeps every candidate because no critic exists yet to pick a winner;
-    this just takes the first one. Revisit once Agent 6 (Review/Critic)
-    can actually judge which candidate is worth animating.
-    """
-    return theme_result.images[0] if theme_result.images else None
+    return None  # that theme was skipped entirely upstream of Agent 5 (Agent 4 retries exhausted there)
 
 
 def start_node(state: VideoGenerationState) -> dict:
@@ -96,10 +110,16 @@ def generate_node(state: VideoGenerationState) -> dict:
     theme = _current_theme(state)
     theme_index = state.get("current_theme_index", 0)
 
-    source_theme = _find_source_image_theme(state, theme.source_setting)
-    source_image = _pick_source_image(source_theme) if source_theme else None
+    source_theme = _find_source_theme(state, theme.source_setting)
+    # Covers both causes described in the module docstring: source_theme
+    # itself is None (Agent 4 skipped this theme, so it never reached
+    # Agent 5), or Agent 5 processed the theme but selected_local_path is
+    # "" because nothing passed its deterministic filter. Both are falsy,
+    # so one check handles both without needing to distinguish them here -
+    # neither is retry-worthy from this agent's side either way.
+    source_image_path = source_theme.selected_local_path if source_theme else None
 
-    if source_image is None:
+    if not source_image_path:
         # No retry-worthy failure here - there's nothing generation could
         # succeed at. Skip immediately, don't touch retries.
         result = ThemeVideoResult(
@@ -127,14 +147,14 @@ def generate_node(state: VideoGenerationState) -> dict:
 
     start = time.monotonic()
     try:
-        uploaded_filename = _client.upload_image(source_image.local_path)
+        uploaded_filename = _client.upload_image(source_image_path)
         workflow = _client.build_video_workflow(
             state["video_workflow_template"],
             image_filename=uploaded_filename,
             positive_prompt=combined_prompt,
             negative_prompt=theme.video_prompt.negative_prompt,
             seed=seed,
-            filename_prefix=f"agent5_{theme_index}",
+            filename_prefix=f"agent6_{theme_index}",
         )
         prompt_id = _client.queue_prompt(workflow)
         history_entry = _client.wait_for_completion(prompt_id)
@@ -160,7 +180,7 @@ def generate_node(state: VideoGenerationState) -> dict:
         subfolder=raw_outputs[0].get("subfolder", ""),
         local_path=local_path,
         seed=seed,
-        source_image_local_path=source_image.local_path,
+        source_image_local_path=source_image_path,
     )
     result = ThemeVideoResult(
         source_setting=theme.source_setting,
@@ -176,7 +196,10 @@ def validate_node(state: VideoGenerationState) -> dict:
     """
     Low bar, same as every other agent's validate_node: did generate_node
     produce SOMETHING (a success or an explicit skip), not whether the
-    video is any good - that's Agent 6's job. Unlike Agent 4, there's no
+    video is any good - image quality was already judged by Agent 5 before
+    this agent ever ran, but video quality itself has no judge yet (a
+    separate video-quality review step, if one gets built, would be a
+    later addition, not this node's job). Unlike Agent 4, there's no
     "expected count" to check against, since it's always exactly one video
     or an explicit skip - the binary presence of a valid _pending_result
     IS the check.

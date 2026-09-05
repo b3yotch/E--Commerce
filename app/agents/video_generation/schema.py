@@ -1,5 +1,5 @@
 """
-Output contract for the Video Generation Agent (Agent 5).
+Output contract for the Video Generation Agent (Agent 6).
 
 Mirrors Agent 4's schema.py shape deliberately (GeneratedVideo /
 ThemeVideoResult / VideoGenerationOutput <-> GeneratedImage /
@@ -11,21 +11,24 @@ carries the actual generated-file details.
 Two real differences from Agent 4's shape, not oversights:
 
 1. No list[GeneratedVideo] per theme - Agent 4 keeps every candidate in a
-   batch because no critic exists yet to pick a winner (see Image_
-   generation.md Challenge 2). Video deliberately generates exactly one
-   per theme (see Video_generation.md Challenge 2 discussion - video's
-   cost profile doesn't reward batching the way cheap image batches did),
-   so `video` is a single optional field, not a list.
+   batch because Agent 5 (Image Selection) picks a winner from that batch
+   before this agent ever runs; by the time Agent 6 sees a theme, there is
+   already exactly one chosen source frame. Video generation itself also
+   deliberately produces exactly one video per theme (see
+   Video_generation.md Challenge 2 discussion - video's cost profile
+   doesn't reward batching the way cheap image batches did), so `video` is
+   a single optional field, not a list.
 2. `status` distinguishes "skipped_no_source_image" from "success" -
    Agent 4 has no equivalent because it always has *something* to attempt
-   (a prompt). This agent can hit a theme with no valid Agent 4 image to
-   animate (that theme was itself skipped upstream after exhausting ITS
-   retries - see Image_generation.md Challenge 3) - that's not a
-   generation failure worth retrying, so it's recorded explicitly rather
-   than silently absent. A genuine retries-exhausted generation failure,
-   by contrast, is NOT recorded here at all - same as Agent 4, the theme
-   is simply absent from theme_results. Worth revisiting both choices
-   together once real failure rates are known.
+   (a prompt). This agent can hit a theme with no valid source frame to
+   animate (that theme was itself skipped upstream - either Agent 4
+   exhausted its own retries, or Agent 5 had nothing valid left to select
+   from after its own deterministic filter - see Image_generation.md
+   Challenge 3 and Image_selection.md) - that's not a generation failure
+   worth retrying, so it's recorded explicitly rather than silently
+   absent. A genuine retries-exhausted generation failure, by contrast, is
+   NOT recorded here at all - same as Agent 4, the theme is simply absent
+   from theme_results.
 """
 
 from __future__ import annotations
@@ -46,10 +49,12 @@ class GeneratedVideo(BaseModel):
     seed: int = Field(description="Seed actually used, for reproducibility/debugging.")
     source_image_local_path: str = Field(
         description=(
-            "Which Agent 4 GeneratedImage.local_path was used as the source frame. "
-            "PLACEHOLDER SELECTION: currently always theme_result.images[0] - the "
-            "first of Agent 4's candidates, not a chosen 'best' one, since no "
-            "critic exists yet to choose (see module docstring)."
+            "Which image was used as the source frame - echoes Agent 5's "
+            "ThemeSelectionResult.selected_local_path verbatim for this "
+            "theme. No longer a placeholder: Agent 5 (Image Selection) "
+            "judges Agent 4's candidates and picks this before Agent 6 "
+            "ever runs, replacing the earlier theme_result.images[0] "
+            "stand-in that was used before Agent 5 existed."
         )
     )
 
@@ -58,7 +63,7 @@ class ThemeVideoResult(BaseModel):
     """Everything produced (or explicitly not produced) for one theme."""
 
     source_setting: str = Field(
-        description="Echoes ThemePromptSet.source_setting verbatim, so this traces back to its origin theme."
+        description="Echoes ThemeSelectionResult.source_setting verbatim, so this traces back to its origin theme."
     )
     video: GeneratedVideo | None = Field(
         default=None,

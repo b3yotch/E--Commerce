@@ -3,20 +3,25 @@ Thin wrappers around model APIs that coerce a model's response into a
 Pydantic schema. Keeping these generic (not agent-specific) so any agent can
 reuse them with its own model and schema.
 
-Two separate entry points, not one function with a provider branch inside:
-Ollama and Groq need genuinely different workarounds (see each function's
-docstring), and folding both into one function with an if/else would hide
-that they're solving different problems rather than sharing one mechanism.
+Three entry points, not one function with branches inside: Ollama, Groq
+text, and Groq vision each need genuinely different handling (see each
+function's docstring), and folding them into one function would hide that
+they're solving different problems rather than sharing one mechanism.
+structured_chat_groq_vision lives next to structured_chat_groq rather than
+duplicating its error handling from scratch, since the two share Groq's
+response_format=json_schema mechanism and only differ in message shape.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
+from pathlib import Path
 from typing import Type, TypeVar
 
 import ollama
-from groq import AsyncGroq
+from groq import AsyncGroq, RateLimitError
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -26,6 +31,19 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMExtractionError(Exception):
     """Raised when the model output can't be parsed/validated against the schema."""
+
+
+class LLMRateLimitError(LLMExtractionError):
+    """
+    Raised specifically for a 429/rate-limit response, as distinct from
+    other LLMExtractionErrors (parse failures, network errors, malformed
+    output). Callers that retry blindly on LLMExtractionError will retry a
+    rate limit exactly as fast as everything else - but an immediate retry
+    inside the same per-minute window is guaranteed to hit the same limit
+    again, so callers need to be able to tell this case apart and back off
+    instead of retrying instantly. See structured_chat_groq_vision's
+    docstring.
+    """
 
 
 def _strip_code_fences(text: str) -> str:
@@ -130,6 +148,20 @@ def _extract_json_object(text: str) -> str:
             if depth == 0:
                 return text[start : i + 1]
     return text[start:]  # unbalanced - let json.loads raise a clear error
+
+
+def _encode_image_data_uri(path: str) -> str:
+    """
+    Reads a local file and encodes it as a base64 data URI. These are files
+    this project generated (Agent 4's GeneratedImage.local_path), not remote
+    URLs, so there's no image_url to pass through - the bytes have to be
+    embedded directly.
+    """
+    ext = Path(path).suffix.lstrip(".").lower() or "png"
+    media_type = "jpeg" if ext in ("jpg", "jpeg") else ext
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/{media_type};base64,{b64}"
 
 
 async def structured_chat(
@@ -266,4 +298,81 @@ async def structured_chat_groq(
     except Exception as exc:  # noqa: BLE001
         raise LLMExtractionError(
             f"Groq output failed schema validation for model {model!r}: {exc}\nRaw output: {raw_content[:500]!r}"
+        ) from exc
+
+
+async def structured_chat_groq_vision(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    image_paths: list[str],
+    schema: Type[T],
+    temperature: float = 0.2,
+    max_tokens: int = 2048,
+) -> T:
+    """
+    Vision-capable counterpart to structured_chat_groq, for the Image
+    Selection Agent's candidate-ranking calls.
+
+    Same response_format=json_schema mechanism as structured_chat_groq -
+    this isn't a different enforcement path, just a different message shape
+    (image_url content blocks alongside text in the user message). image_paths
+    are local filesystem paths, not remote URLs, since these are files this
+    project generated (Agent 4's local_path) - each is read and
+    base64-encoded into a data URI rather than passed as a hosted link.
+
+    NOTE: Groq's vision-capable models have historically capped how many
+    images fit in a single request, and that cap has changed as the
+    available vision models themselves have changed - verify the current
+    limit for whichever model `settings.image_selection_model` points at.
+    Callers are expected to have already trimmed image_paths to a sane
+    count (see nodes.py's use of image_selection_max_images_per_call);
+    this function does not enforce a limit itself, since the true limit is
+    a property of the model, not of this call.
+    """
+    client = AsyncGroq(api_key=settings.groq_api_key)
+
+    content: list[dict] = [{"type": "text", "text": user_prompt}]
+    for path in image_paths:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _encode_image_data_uri(path)},
+            }
+        )
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.__name__,
+                    "schema": schema.model_json_schema(),
+                },
+            },
+        )
+    except RateLimitError as exc:
+        # Caught separately from the generic Exception branch below - see
+        # LLMRateLimitError's docstring for why this needs to be
+        # distinguishable to callers, not just another LLMExtractionError.
+        raise LLMRateLimitError(f"Groq vision API rate limit hit for model {model!r}: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - network/API errors also need to trigger fallback in nodes.py
+        raise LLMExtractionError(f"Groq vision API call failed for model {model!r}: {exc}") from exc
+
+    raw_content = response.choices[0].message.content or ""
+
+    try:
+        parsed = json.loads(raw_content)
+        return schema.model_validate(parsed)
+    except Exception as exc:  # noqa: BLE001
+        raise LLMExtractionError(
+            f"Groq vision output failed schema validation for model {model!r}: {exc}\nRaw output: {raw_content[:500]!r}"
         ) from exc
