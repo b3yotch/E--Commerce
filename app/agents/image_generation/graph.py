@@ -21,6 +21,15 @@ one, rather than failing the whole product over one bad theme. Worth
 revisiting once real failure rates are known - if a specific theme fails
 often, that's more likely a prompt/checkpoint mismatch worth surfacing
 loudly than something to quietly skip forever.
+
+build_graph(checkpointer=...) - added so this agent's runs can be resumed
+mid-loop via LangGraph's own checkpointing (a crash on theme 3 of 5 doesn't
+mean redoing themes 1-2). The module-level image_generation_graph below
+stays uncheckpointed - existing callers that don't need resumability keep
+working unchanged; test_full_pipeline_live.py builds its own checkpointed
+instance separately, since the checkpointer's connection lifecycle
+(open/close) belongs to whoever's actually running the pipeline, not to
+this module.
 """
 
 from __future__ import annotations
@@ -58,7 +67,7 @@ def _after_advance(state: ImageGenerationState) -> str:
     return "finalize"
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     graph = StateGraph(ImageGenerationState)
 
     graph.add_node("start", start_node)
@@ -86,10 +95,10 @@ def build_graph():
     )
     graph.add_edge("finalize", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # Compiled once at import time, matching the pattern research_graph /
 # creative_strategy_graph / prompt_gen_graph already use in
-# test_full_pipeline_live.py.
+# test_full_pipeline_live.py. Uncheckpointed - see module docstring.
 image_generation_graph = build_graph()

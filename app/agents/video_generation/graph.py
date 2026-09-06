@@ -14,6 +14,14 @@ _after_validate / _after_advance routing logic, just re-pointed at this
 agent's state field names (retries/error -> same names, current_theme_index
 -> driven by prompts.prompt_sets length instead of prompts stored under a
 different key).
+
+build_graph(checkpointer=...) - added for the same reason as Agent 4's:
+this is the single most expensive stage in the pipeline (up to ~4500s per
+attempt), so a crash after video 1 of 2 succeeded should never mean redoing
+video 1. The module-level video_generation_graph below stays uncheckpointed
+- test_full_pipeline_live.py builds its own checkpointed instance
+separately, since the checkpointer's connection lifecycle belongs to
+whoever's running the pipeline, not to this module.
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ def _after_advance(state: VideoGenerationState) -> str:
     return "finalize"
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     graph = StateGraph(VideoGenerationState)
 
     graph.add_node("start", start_node)
@@ -79,9 +87,9 @@ def build_graph():
     )
     graph.add_edge("finalize", END)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # Compiled once at import time, matching the pattern the other agents'
-# graphs already use.
+# graphs already use. Uncheckpointed - see module docstring.
 video_generation_graph = build_graph()
