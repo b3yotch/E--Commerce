@@ -20,40 +20,71 @@ Also deliberately NOT mutating Agent 4's ImageGenerationOutput in place -
 this agent produces its own output referencing Agent 4's candidates by
 local_path, the same way Agent 5 references Agent 4's output rather than
 editing it.
+
+ImageCandidateScore/ImageCritiqueResponse were trimmed after a real
+json_validate_failed error from Groq's strict JSON-schema decoding
+(qwen/qwen3.6-27b): the original shape had an optional field with a
+default (issues: list[str] = Field(default_factory=list)) and numeric
+range constraints (Field(ge=0, le=100)) on score - either an unsupported
+schema feature or the extra verbosity pushing generation past
+image_selection_max_tokens before it could close the JSON could explain a
+deterministic (not transient) validation failure. Fixed by making every
+field required with no defaults, dropping the ge/le constraints (the 0-100
+range is enforced by instruction text in prompts.py instead, not the
+schema), and removing image_index entirely - candidates are matched to
+their image by array position instead of a redundant explicit field,
+which also cuts tokens needed per candidate.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ImageCandidateScore(BaseModel):
-    """The critic's judgment on one candidate image."""
+    """
+    The critic's judgment on one candidate image. Matched to its image by
+    position in ImageCritiqueResponse.candidate_scores, not by an explicit
+    index field - see module docstring for why that field was removed.
+    """
 
-    image_index: int = Field(
-        description="0-based index matching the order images were shown to the model in this call."
-    )
+    model_config = ConfigDict(extra="forbid")
+
     score: int = Field(
-        ge=0,
-        le=100,
-        description="0-100 against the local-checkpoint-calibrated rubric (see prompts.py), not an absolute quality scale.",
+        description=(
+            "0-100 against the local-checkpoint-calibrated rubric (see "
+            "prompts.py), not an absolute quality scale. Stay within 0-100 - "
+            "not enforced by the schema itself (see module docstring), so "
+            "this is instruction-only."
+        )
     )
-    issues: list[str] = Field(
-        default_factory=list,
-        description="Brief notes on real problems found, if any. Empty when the candidate is clean.",
+    issue: str = Field(
+        description=(
+            "The single biggest real problem found with this candidate, in "
+            "one short sentence. Use an empty string if there are no real "
+            "problems - always include this field, never omit it."
+        )
     )
 
 
 class ImageCritiqueResponse(BaseModel):
     """Raw shape returned by the vision model for one theme's candidate set."""
 
-    candidate_scores: list[ImageCandidateScore]
-    best_index: int = Field(
-        description="0-based index of the strongest candidate, matching candidate_scores indices."
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_scores: list[ImageCandidateScore] = Field(
+        description=(
+            "One entry per candidate image, in the SAME ORDER the images "
+            "were shown. Position in this list is how a score is matched "
+            "back to its image - there is no separate index field."
+        )
     )
-    rationale: str = Field(description="1-2 sentences on why best_index was chosen over the others.")
+    best_index: int = Field(
+        description="0-based position in candidate_scores (and in the images you were shown) of the strongest candidate."
+    )
+    rationale: str = Field(description="Why best_index was chosen over the others, in one short sentence.")
 
 
 class ThemeSelectionResult(BaseModel):

@@ -136,14 +136,17 @@ class Settings(BaseSettings):
     # changes again.
     # ---------------------------------------------------------------
     image_selection_model: str = "qwen/qwen3.6-27b"
-    # Lowered from 2048: this org's on-demand tier caps qwen/qwen3.6-27b at
-    # 1000 output tokens/minute, and Groq's own estimate for a 2048-token
-    # budget against the 5-candidate schema (1347 estimated) already
-    # exceeded that. 800 leaves margin under the cap; if responses start
-    # getting truncated (invalid/incomplete JSON) rather than rate-limited,
-    # that's a sign the rubric or candidate count needs trimming instead of
-    # raising this back up, since raising it re-triggers the 429.
-    image_selection_max_tokens: int = 800
+    # Was 2048, then dropped to 800 to fit under Groq's 1000 output-tokens/
+    # minute cap (see the OTPM 429 this org hit). 800 then produced a
+    # deterministic json_validate_failed on every call - plausibly
+    # truncation (800 wasn't enough to finish the full JSON before running
+    # out) or a strict-schema incompatibility in the older schema shape
+    # (see image_selection_agent/schema.py's module docstring for the fix
+    # to that). Schema.py was trimmed to need fewer tokens per candidate
+    # (no image_index field, one issue string instead of a list), so 900
+    # should have more real headroom to actually finish than 800 did,
+    # while still staying under the 1000/minute ceiling.
+    image_selection_max_tokens: int = 900
     image_selection_temperature: float = 0.2
     # Below this score, the pick is still made (Agent 5 needs one image per
     # theme regardless) but flagged "selected_below_threshold" rather than

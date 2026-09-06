@@ -133,10 +133,15 @@ async def select_node(state: ImageSelectionState) -> dict:
     if best_index < 0 or best_index >= len(valid_images):
         best_index = 0  # malformed index from the model - don't propagate it
 
-    best_score = next(
-        (c.score for c in critique.candidate_scores if c.image_index == best_index),
-        0,
-    )
+    # candidate_scores is matched by position, not an explicit index field
+    # (see schema.py) - guarded separately from the valid_images bound
+    # above since the model could in principle return fewer score entries
+    # than images shown, and the two lists aren't guaranteed the same
+    # length just because best_index is valid against one of them.
+    if 0 <= best_index < len(critique.candidate_scores):
+        best_score = critique.candidate_scores[best_index].score
+    else:
+        best_score = 0  # model returned fewer/misaligned scores than images shown - treat as unscored
     status = (
         "selected"
         if best_score >= settings.image_selection_score_threshold
