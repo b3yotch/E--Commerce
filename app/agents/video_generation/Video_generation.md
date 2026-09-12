@@ -1,13 +1,13 @@
-# Agent 5: Video Generation Agent
+# Agent 6: Video Generation Agent
 
 ## Purpose
 
 Takes Agent 3's `PromptGenerationOutput` (for `video_prompt` per theme)
-**and** Agent 4's `ImageGenerationOutput` (for the source frame per
-theme), and turns each theme's `video_prompt` into a generated video via
-image-to-video generation against a local ComfyUI instance. Fifth stage
-of the AI Product Creative Generation Workflow - and the first agent in
-this pipeline that consumes two upstream outputs at once, since
+**and** Agent 5's `ImageSelectionOutput` (for the already-chosen source
+frame per theme), and turns each theme's `video_prompt` into a generated
+video via image-to-video generation against a local ComfyUI instance.
+Sixth stage of the AI Product Creative Generation Workflow - and the first
+agent in this pipeline that consumes two upstream outputs at once, since
 image-to-video generation genuinely needs both a prompt and a starting
 image, not just one or the other.
 
@@ -16,12 +16,19 @@ fine-tune of CogVideoX-2B (there's no official THUDM CogVideoX-2B I2V
 release; only 5B-I2V exists upstream), confirmed back when Agent 3's
 schema was being finalized (see `Prompt_generation.md` Challenge 6).
 
-This landed as its own Agent 5, not an extension of Agent 4's "Image/Video
+This landed as its own agent, not an extension of Agent 4's "Image/Video
 Generation" combined agent as originally sketched in the pipeline
 diagram - decided explicitly rather than left to drift, since video's
 cost profile (minutes per attempt vs. Agent 4's seconds) is different
-enough to warrant its own retry/batching decisions. That pushes
-Review/Critic from Agent 5 to Agent 6.
+enough to warrant its own retry/batching decisions.
+
+**Renumbered from Agent 5 to Agent 6** once Agent 5 (Image Selection) was
+actually built - see Challenge 8. This agent originally consumed Agent 4's
+raw `ImageGenerationOutput` directly, picking `images[0]` as a placeholder
+source frame (see Challenge 6, original form). It now consumes Agent 5's
+`ImageSelectionOutput` instead, which already carries a judged
+`selected_local_path` per theme - no picking logic lives in this agent
+anymore.
 
 ## How it works
 
@@ -39,18 +46,23 @@ same reason: this agent also iterates a variable number of themes
 (typically 2-3, driven by `prompts.prompt_sets`' length). One video per
 theme, no batching - Agent 4's "generate N, keep the best M" reasoning for
 images doesn't transfer here; a single extra video generation is already
-expensive enough that batching would need a critic to justify (see
-Challenge 6 below), same as it did for images.
+expensive enough that batching would need a critic to justify, same as it
+did for images (see Challenge 6).
 
 1. **start** - loads the API-format ComfyUI workflow JSON once (not
    per-theme, since the template doesn't change across themes - only the
    per-call patches do) and generates a `run_id`, same convention as
    Agent 4's run-scoped output folders.
-2. **generate** (`nodes.py` + `video_comfyui_client.py`) - finds the
-   Agent 4 image whose `source_setting` matches the current theme, picks
-   a source frame from it, uploads that frame back to ComfyUI, builds and
-   queues the video workflow, polls to completion, and copies the result
-   into this project's own output directory.
+2. **generate** (`nodes.py` + `video_comfyui_client.py`) - finds Agent 5's
+   already-judged `ThemeSelectionResult` whose `source_setting` matches the
+   current theme and reads its `selected_local_path` directly, uploads
+   that frame back to ComfyUI, builds and queues the video workflow, polls
+   to completion, and copies the result into this project's own output
+   directory. A theme with no usable source frame (empty
+   `selected_local_path`, or the theme missing from Agent 5's output
+   entirely because Agent 4 skipped it further upstream) is recorded as an
+   explicit `skipped_no_source_image` result rather than burning a retry
+   on something retrying can't fix.
 3. **validate** - lowest bar of any agent in this pipeline: did
    `generate_node` produce a result at all (a success or an explicit
    skip) - there's no count to check the way Agent 4 checks image count,
@@ -142,6 +154,9 @@ inherited-from-image default of 1. At minutes-per-attempt cost on
 constrained hardware, a "free" retry costs real, non-trivial time for a
 theme that already failed once - worth deciding deliberately rather than
 assuming image's retry philosophy carries over unchanged.
+
+A real full pipeline run later measured this stage at **1963.87s (~33
+minutes)** for 2 videos, in line with the per-attempt estimate above.
 
 ### 3. `num_frames` turned out to be a real runtime parameter - correcting an assumption made back in Agent 3
 
@@ -240,21 +255,40 @@ failed") is unreliable, a cleanup action built on top of that detection
 inherits the same unreliability, and can do active damage precisely when
 the detection was wrong rather than right.
 
-### 6. Source-frame selection has no critic to ask, same gap Agent 4 already flagged
+### 6. Source-frame selection had no critic to ask - resolved once Agent 5 (Image Selection) existed
 
 Agent 4 generates multiple candidate images per theme and explicitly
-defers picking a "best" one to a future critic agent (see `Image_
-generation.md` Challenge 2 - no critic exists yet, so "oversample and
-filter" would just produce extra files with nothing to do the filtering).
-This agent needs exactly *one* source frame per theme to animate, and
-inherits the same gap one level down: there's still no critic to ask.
+defers picking a "best" one to a future critic agent (see
+`Image_generation.md` Challenge 2 - no critic exists yet, so "oversample
+and filter" would just produce extra files with nothing to do the
+filtering). This agent needed exactly *one* source frame per theme to
+animate, and inherited the same gap one level down: there was still no
+critic to ask.
 
-Resolved for now with `theme_result.images[0]` - the first of Agent 4's
-candidates, arbitrary rather than chosen. Flagged explicitly in both
+Originally resolved with `theme_result.images[0]` - the first of Agent 4's
+candidates, arbitrary rather than chosen - flagged explicitly in both
 `schema.py`'s docstring and inline at the selection site
 (`_pick_source_image` in `nodes.py`) as a placeholder, not a considered
-decision, so it's easy to find and replace once Agent 6 (Review/Critic)
-exists and can actually judge which candidate is worth animating.
+decision.
+
+**Now actually resolved**, once Agent 5 (Image Selection) was built (see
+`Image_selection.md`). `_pick_source_image` is gone entirely - it existed
+only to hold that placeholder logic. `nodes.py` now looks up Agent 5's
+`ThemeSelectionResult` for the current theme (matched by `source_setting`,
+same convention used throughout this pipeline) and reads
+`selected_local_path` directly. `state.py`'s upstream-images field was
+renamed from `images: ImageGenerationOutput` to
+`selection: ImageSelectionOutput` - not just a rename, the type changed
+too, deliberately, so a stale read against the old shape would fail loudly
+at the type level rather than silently doing the wrong thing.
+
+One small, easy-to-miss bug caught during the renumbering that produced
+this fix (see Challenge 8): `generate_node`'s ComfyUI `filename_prefix`
+was still `f"agent5_{theme_index}"`, a leftover from when this agent was
+itself numbered 5. It doesn't error - it just mislabels every saved video
+file with the wrong agent number - which is exactly the kind of bug that
+survives silently forever if nothing forces a full read-through of the
+file. Now `f"agent6_{theme_index}"`.
 
 ### 7. Two schema fields, one text input - combining `base_prompt` and `motion_description`
 
@@ -274,10 +308,52 @@ authored, even though they collapse into one string at the point they're
 consumed - the same reasoning that keeps `style_notes` separate from
 `positive_prompt` in Agent 3's `ImageGenerationPrompt`.
 
+### 8. Renumbered from Agent 5 to Agent 6 once Agent 5 (Image Selection) was actually built
+
+Agent 4's own `schema.py` docstring anticipated the eventual critic as
+"Agent 5" before this agent existed. This agent got built first and
+temporarily claimed that number, using the `images[0]` placeholder
+described in Challenge 6. Once Image Selection was actually designed and
+built, the mismatch became worth fixing rather than living with
+permanently: the critic is now Agent 5 (matching what Agent 4's docstring
+always expected), and this agent moved to Agent 6 - agent number matches
+graph position again.
+
+Renumbering touched more than a comment: `schema.py` and `state.py` here
+were updated to reference Agent 5 by name and consume
+`ImageSelectionOutput` (see Challenge 6's resolution above), and
+`nodes.py`'s ComfyUI filename prefix bug (also Challenge 6) was caught
+specifically *because* the renumbering forced a full read-through of this
+file rather than a targeted edit.
+
+### 9. LangGraph-native checkpointing added, given how expensive a partial loss actually is here
+
+This agent's own measured cost (Challenge 2: up to ~4500s per attempt,
+~1964s for a real 2-video run) makes it one of two stages (with Agent 4)
+where losing partial progress to a crash is genuinely expensive - unlike
+Agents 1-3 and Agent 5, where redoing a whole stage from zero costs little.
+
+Rather than the flat per-stage JSON checkpoint used for the cheaper
+stages (write the whole output once a stage fully finishes), this agent's
+`graph.py` now accepts an optional `checkpointer` at compile time,
+compiled with LangGraph's own `AsyncSqliteSaver` by the pipeline runner.
+LangGraph persists state after every node, not just at the end - so a
+crash after video 1 of 2 succeeded resumes at video 2, not video 0, via
+`graph.aget_state(config)` distinguishing three cases (never started,
+partway through, already finished) rather than the flat JSON mechanism's
+two (finished or not). The module-level `video_generation_graph` compiled
+at import time stays uncheckpointed, for any caller that doesn't need
+resumability - the pipeline runner builds its own checkpointed instance
+separately, since the checkpointer's connection lifecycle belongs to
+whoever's actually running the pipeline.
+
 ## Deliberately deferred (not gaps, decisions)
 
-- **Candidate selection / oversampling**: see Challenge 6. Revisit once
-  Agent 6 exists.
+- **Candidate selection / oversampling**: see Challenge 6 - now resolved
+  by Agent 5 (Image Selection). Whether Agent 5's judgment itself should
+  ever trigger Agent 4 to regenerate (rather than falling back to a
+  best-available pick) is Agent 5's own deferred decision, not this
+  agent's - see `Image_selection.md`.
 - **Concurrency across themes**: sequential only, same as Agent 4 - more
   true here than for images, given video's measured per-attempt cost.
 - **Provider-level backoff nuance**: same deferred item as every prior
@@ -296,6 +372,13 @@ consumed - the same reasoning that keeps `style_notes` separate from
   whether retries help. Revisit with evidence about how often failures are
   transient (worth retrying) vs. hardware-bound (retrying just pays the
   same cost twice for the same outcome).
+- **A video-quality critic (post-generation)**: judging the *finished*
+  video, not just the source frame that went into it, was discussed
+  during Agent 5's design and deliberately deferred until Agent 5 proved
+  itself - see `Image_selection.md`. Would need a flag-and-pass-through
+  failure mode, not auto-regeneration, for the same reason
+  `max_video_gen_retries` sits at 0: a failed video costs another ~60
+  minutes to redo.
 
 ## Design decisions worth remembering for later agents
 
@@ -323,3 +406,24 @@ consumed - the same reasoning that keeps `style_notes` separate from
   retry *mechanism* does - the right number depends on what a retry
   actually costs, which changed by roughly two orders of magnitude between
   these two agents.
+- **A placeholder that's flagged loudly at write time is worth the
+  discipline, even months later.** `_pick_source_image`'s docstring
+  ("PLACEHOLDER SELECTION... revisit once a critic exists") is exactly why
+  Challenge 6's resolution was a clean swap instead of an archaeology
+  project - the thing to change and the reason it existed were both
+  written down at the point the shortcut was taken, not left to be
+  reconstructed later.
+- **A renumbering is a good forcing function for a full read-through, not
+  just a find-and-replace.** The `agent5_`/`agent6_` filename-prefix bug
+  in Challenge 6/8 wasn't caught by design review - it was caught because
+  updating this file's agent number required actually reading the whole
+  file, not just the parts that obviously referenced "Agent 5" as a
+  concept.
+- **Match the checkpointing mechanism's granularity to what a partial loss
+  actually costs**, not uniformly across every agent. This agent and
+  Agent 4 get LangGraph's own node-level checkpointer specifically because
+  a partial loss here is expensive (minutes to an hour); Agents 1-3 and 5
+  stay on a cheaper flat-JSON, whole-stage-only mechanism because a
+  partial loss there is cheap. Neither is a strictly better default - it's
+  a cost-matched choice per agent, the same category of reasoning as the
+  retry-count lesson above.
