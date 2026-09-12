@@ -247,6 +247,87 @@ async def structured_chat(
         ) from exc
 
 
+async def structured_chat_vision(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    image_paths: list[str],
+    schema: Type[T],
+    temperature: float = 0.2,
+    num_predict: int | None = None,
+) -> T:
+    """
+    Vision-capable counterpart to structured_chat, for locally-run
+    multimodal Ollama models - confirmed working for qwen3.5:4b (a real,
+    accurate image description came back in testing), unlike Ollama's
+    still-incomplete support for some other vision-packaged models whose
+    separate mmproj files it doesn't yet load.
+
+    Same reasoning as structured_chat for not using Ollama's native
+    format=schema: it's the same underlying model family and stacking bug
+    (see structured_chat's docstring - thinking left on can burn the whole
+    output budget and return nothing; thinking off can make format get
+    silently ignored). Disable thinking, drop format, describe the schema
+    in the prompt, parse tolerantly ourselves - identical strategy, now
+    also handling an image.
+
+    This also sidesteps the exact failure category the earlier Groq vision
+    path hit (json_validate_failed from GROQ'S OWN strict server-side
+    schema validation) by construction: there is no server-side strict
+    validator here, only _extract_json_object's tolerant parsing - a
+    truncated or slightly malformed response becomes an LLMExtractionError
+    we control and can retry, not an opaque 400 from a provider.
+
+    image_paths are local filesystem paths - ollama's client reads and
+    encodes them itself (no manual base64/data-URI step, unlike the Groq
+    vision path's _encode_image_data_uri).
+    """
+    client = ollama.AsyncClient(host=settings.ollama_host)
+
+    schema_hint = (
+        "\n\nRespond with ONLY a single JSON object - no markdown code fences, "
+        "no commentary before or after it. Here is the exact shape to return, "
+        "with placeholder values showing what kind of content belongs in each "
+        "field - replace every placeholder with real content, and do not "
+        "return this structure with the placeholders still in it, and do not "
+        "return a JSON Schema definition (no 'properties'/'type' keys):\n"
+        f"{_build_example_json(schema)}"
+    )
+
+    response = await client.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt + schema_hint},
+            {"role": "user", "content": user_prompt, "images": image_paths},
+        ],
+        think=False,
+        keep_alive="30m",
+        options={
+            "temperature": temperature,
+            "num_ctx": settings.ollama_num_ctx,
+            "num_predict": num_predict or settings.ollama_num_predict,
+        },
+    )
+
+    raw_content = response["message"]["content"] or ""
+
+    if not raw_content.strip():
+        # Same leak-into-thinking-field behavior as structured_chat, even
+        # with think=False - see that function's docstring.
+        raw_content = response["message"].get("thinking") or ""
+
+    json_text = _extract_json_object(raw_content)
+
+    try:
+        parsed = json.loads(json_text)
+        return schema.model_validate(parsed)
+    except Exception as exc:  # noqa: BLE001 - we want to wrap any parse/validation error
+        raise LLMExtractionError(
+            f"Model output failed schema validation: {exc}\nRaw output: {raw_content[:500]!r}"
+        ) from exc
+
+
 async def structured_chat_groq(
     *,
     model: str,

@@ -6,7 +6,9 @@ Two-step judgment per theme, settled in Image_selection.md:
    before spending a model call on them at all.
 2. Vision-LLM comparative ranking of whatever survives the filter, shown
    together against the theme's creative brief - a relative choice among a
-   small set, not independent scoring compared after the fact.
+   small set, not independent scoring compared after the fact. Runs
+   locally via Ollama (qwen3.5:4b) - see config.py's comment for why this
+   replaced the original hosted Groq vision model.
 
 Failure handling deliberately never leaves a theme with no selection -
 Agent 5 needs exactly one source frame per theme, so every branch below
@@ -23,7 +25,6 @@ without needing a separate retry branch in the conditional edge.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 from PIL import Image, UnidentifiedImageError
@@ -36,7 +37,7 @@ from app.agents.image_selection_agent.schema import (
 )
 from app.agents.image_selection_agent.state import ImageSelectionState
 from app.core.config import settings
-from app.core.llm import LLMExtractionError, LLMRateLimitError, structured_chat_groq_vision
+from app.core.llm import LLMExtractionError, structured_chat_vision
 
 
 def _is_valid_image(path: str) -> bool:
@@ -87,34 +88,27 @@ async def select_node(state: ImageSelectionState) -> dict:
         )
         return _advance(state, result)
 
-    # Some Groq vision models cap how many images fit in one request - this
-    # has changed before and will likely change again, so it's a config
-    # value, not a hardcoded number. Truncating (rather than erroring) keeps
-    # a theme with more candidates than the model's limit from blocking the
-    # whole run; the untruncated candidates are simply never considered.
+    # No longer a hard API ceiling now that this runs locally via Ollama -
+    # kept as a soft cap for latency/focus (see config.py's comment).
     valid_images = valid_images[: settings.image_selection_max_images_per_call]
     image_paths = [img.local_path for img in valid_images]
 
     try:
-        critique = await structured_chat_groq_vision(
+        critique = await structured_chat_vision(
             model=settings.image_selection_model,
             system_prompt=CRITIC_SYSTEM_PROMPT,
             user_prompt=build_user_prompt(theme.source_setting, len(image_paths)),
             image_paths=image_paths,
             schema=ImageCritiqueResponse,
             temperature=settings.image_selection_temperature,
-            max_tokens=settings.image_selection_max_tokens,
+            num_predict=settings.image_selection_max_tokens,
         )
     except LLMExtractionError as exc:
         retries = state.get("retries", 0)
         if retries < settings.max_image_selection_retries:
-            if isinstance(exc, LLMRateLimitError):
-                # Retrying instantly here would land inside the same
-                # per-minute OTPM window and hit the identical 429 again -
-                # that's exactly what happened before this fix (all 2
-                # retries failed identically, for every theme). Wait past
-                # the window instead of retrying on the next graph pass.
-                await asyncio.sleep(settings.image_selection_rate_limit_backoff_seconds)
+            # No rate-limit-specific backoff needed here (unlike the
+            # earlier Groq path) - this runs locally with no per-minute
+            # quota to wait out, so an immediate retry is fine.
             return {"retries": retries + 1, "error": str(exc)}
         # Retries exhausted - fall back to the first valid candidate rather
         # than losing the theme entirely (same reasoning as the

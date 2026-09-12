@@ -121,48 +121,47 @@ class Settings(BaseSettings):
 
     # ---------------------------------------------------------------
     # Image Selection (Critic) Agent - Agent 5, runs between Agent 4 and
-    # Agent 6 (Video Generation). Vision model is hosted (Groq) rather
-    # than local: the RTX 3050 is already committed to ComfyUI for
-    # image/video generation, and this is one of the lowest-volume,
-    # highest-consequence judgments in the pipeline - not a place to save
-    # cost with a weaker local model.
+    # Agent 6 (Video Generation). Originally used Groq's qwen/qwen3.6-27b
+    # (hosted vision preview model), but that hit two separate real
+    # problems in practice: an OTPM 429 (1000 output-tokens/minute cap on
+    # this org's tier) and, after fixing that, a deterministic
+    # json_validate_failed from Groq's own strict server-side JSON-schema
+    # validation - roughly 2/3 of calls failed all retries and fell back
+    # to an unjudged first candidate, defeating the point of the agent.
     #
-    # image_selection_model is a Groq PREVIEW model as of this writing -
-    # Groq's vision lineup has changed more than once already (Llama 4
-    # Scout/Maverick vision were deprecated). Confirmed against Groq's own
-    # docs: qwen/qwen3.6-27b caps at 5 images/request, 20MB max size,
-    # 2048 tokens per image - image_selection_max_images_per_call below
-    # matches that limit as of this writing, but re-verify if the model
-    # changes again.
+    # Switched to running locally via Ollama's qwen3.5:4b, whose vision
+    # capability was confirmed working (`ollama show qwen3.5:4b` lists
+    # "vision"; a real, accurate description came back for an actual test
+    # image) before committing to the switch. This also sidesteps the
+    # json_validate_failed failure category by construction - Ollama's
+    # path uses this project's own tolerant JSON parsing (see llm.py's
+    # structured_chat_vision), not a provider's strict server-side
+    # validator, and has no per-minute output-token quota to hit at all.
+    #
+    # Tradeoff worth watching: qwen3.5:4b is far smaller than the 27B
+    # model it replaced, so image-judgment quality may be less nuanced -
+    # and it now runs on the same RTX 3050 ComfyUI uses for image/video
+    # generation, so there's VRAM to share (though not contend for at the
+    # same instant, since this agent runs after Agent 4 finishes and
+    # before Agent 6 starts).
     # ---------------------------------------------------------------
-    image_selection_model: str = "qwen/qwen3.6-27b"
-    # Was 2048, then dropped to 800 to fit under Groq's 1000 output-tokens/
-    # minute cap (see the OTPM 429 this org hit). 800 then produced a
-    # deterministic json_validate_failed on every call - plausibly
-    # truncation (800 wasn't enough to finish the full JSON before running
-    # out) or a strict-schema incompatibility in the older schema shape
-    # (see image_selection_agent/schema.py's module docstring for the fix
-    # to that). Schema.py was trimmed to need fewer tokens per candidate
-    # (no image_index field, one issue string instead of a list), so 900
-    # should have more real headroom to actually finish than 800 did,
-    # while still staying under the 1000/minute ceiling.
-    image_selection_max_tokens: int = 900
+    image_selection_model: str = "qwen3.5:4b"
+    # Feeds num_predict for the Ollama call (see structured_chat_vision) -
+    # no longer constrained by Groq's OTPM cap, so this has real headroom
+    # now; kept at a moderate value since the actual output (a handful of
+    # scores plus short rationale) doesn't need much more than this.
+    image_selection_max_tokens: int = 1024
     image_selection_temperature: float = 0.2
     # Below this score, the pick is still made (Agent 5 needs one image per
     # theme regardless) but flagged "selected_below_threshold" rather than
     # "selected" - see image_selection_agent/schema.py.
     image_selection_score_threshold: int = 55
     max_image_selection_retries: int = 2
-    # An immediate retry inside the same one-minute OTPM window as a
-    # rate-limited call is guaranteed to hit the same limit again - this is
-    # how long select_node waits before retrying specifically after a
-    # LLMRateLimitError (not other failures), a few seconds past 60s to
-    # clear the window with margin.
-    image_selection_rate_limit_backoff_seconds: float = 65.0
-    # Some Groq vision models cap images-per-request; this has changed
-    # before and will likely change again, so it's a config value rather
-    # than hardcoded in nodes.py. Verify against the current model's actual
-    # limit rather than trusting this default.
+    # No longer a hard API ceiling (Groq's 5-images-per-request cap doesn't
+    # apply locally) - kept as a soft cap for latency/focus: a small local
+    # model judging fewer images at once is faster and likely more
+    # reliable than one judging many at once, even though it could
+    # technically be sent more given qwen3.5:4b's 262K context.
     image_selection_max_images_per_call: int = 5
 
 
