@@ -7,15 +7,26 @@ prompts, on the way to generating marketing images/videos automatically.
 ## Pipeline
 
 ```
-[URL] --> Agent 1: Product Research --> Agent 2: Creative Strategy --> Agent 3: Prompt Generation --> Agent 4: Image Generation (ComfyUI) --> Agent 5: Video Generation (ComfyUI) --> Agent 6: Review/Critic
-              (done)                          (done)                        (done)                              (done)                                        (done)                                     (not started)
+[URL] --> Agent 1: Product Research --> Agent 2: Creative Strategy --> Agent 3: Prompt Generation --> Agent 4: Image Generation (ComfyUI) --> Agent 5: Image Selection (Critic) --> Agent 6: Video Generation (ComfyUI)
+              (done)                          (done)                        (done)                              (done)                                        (done)                                              (done)
 ```
 
 Video generation was originally planned as part of a combined Agent 4
-("Image/Video Generation"), but landed as its own Agent 5 once actually
+("Image/Video Generation"), but landed as its own agent once actually
 built - see `Video_generation.md`'s intro for why that split was made
 explicit rather than drifting into whichever agent the code happened to
-get written into. That push Review/Critic from Agent 5 to Agent 6.
+get written into. That agent temporarily claimed the number 5 (the number
+Agent 4's own schema docstring had already reserved for a future critic),
+since it was built before the critic was. Once Image Selection was
+actually designed and built, the pipeline was renumbered so agent number
+matches graph position again: **Image Selection is Agent 5, Video
+Generation is Agent 6** - see `Image_selection.md` Challenge 4 and
+`Video_generation.md` Challenge 8 for the full mechanics of that swap.
+
+A video-*quality* critic (judging Agent 6's finished output, as opposed to
+Agent 5 judging Agent 4's candidate frames) was discussed during Agent 5's
+design and deliberately deferred until Agent 5 proved itself in a real
+run. It has - see "Known gaps to revisit" below.
 
 Plus a bulk CSV processing layer (not started) for running the whole
 pipeline across many product URLs at once.
@@ -23,11 +34,13 @@ pipeline across many product URLs at once.
 Each agent is a self-contained LangGraph subgraph living in its own
 `app/agents/<name>/` folder (`schema.py`, `prompts.py`, `state.py`,
 `nodes.py`, `graph.py`), sharing common infrastructure in `app/core/` -
-except Agent 5, which deliberately owns its own `comfyui_client.py` rather
-than sharing Agent 4's (see `Video_generation.md`). Design rationale and
-hard-won debugging lessons for each agent are written up in detail in
-`Product_research.md`, `Creative_strategy.md`, `Prompt_generation.md`,
-`Image_generation.md`, and `Video_generation.md` - this README covers
+except Agent 6, which deliberately owns its own `comfyui_client.py` rather
+than sharing Agent 4's (see `Video_generation.md`), and Agent 5, which has
+no `prompts.py`/ComfyUI client at all - its only external call is a vision
+LLM judgment, no generation. Design rationale and hard-won debugging
+lessons for each agent are written up in detail in `Product_research.md`,
+`Creative_strategy.md`, `Prompt_generation.md`, `Image_generation.md`,
+`Image_selection.md`, and `Video_generation.md` - this README covers
 setup, running, and configuration; those files cover *why* things are
 built the way they are.
 
@@ -67,7 +80,8 @@ scrape --> extract --> validate --+--> END (valid, or retries exhausted)
    JSON object closes** (cuts wasted trailing-commentary generation), and
    is parsed with a tolerant brace-matching extractor.
 3. **validate** - low bar sanity check (non-empty title). Deeper quality
-   judgment belongs to the Review/Critic agent later in the pipeline.
+   judgment belongs to Agent 5 later in the pipeline, for image output at
+   least - see `Image_selection.md`.
 4. **bump_retry** - increments the retry counter and loops back to
    `extract` if validation failed and retries remain
    (`max_extraction_retries`, default 2).
@@ -75,7 +89,9 @@ scrape --> extract --> validate --+--> END (valid, or retries exhausted)
 A 4B local model is viable here because this agent's job is *extraction*,
 not *recall* - it's structuring text already in its context window, not
 answering from training knowledge. The one genuinely interpretive field is
-`brand_positioning`.
+`brand_positioning`. The same local model (`qwen3.5:4b`) later turned out
+to be natively multimodal too, which is what Agent 5 ended up running its
+vision judgment on - see `Image_selection.md` Challenge 7.
 
 ## Agent 2: Creative Strategy
 
@@ -163,14 +179,14 @@ detailed captions, not short ones - with a length check added to
 `validate_node` to catch a prompt likely to exceed the text encoder's
 ~226-token ceiling before it silently truncates at generation time.
 
-**Correction, discovered while building Agent 5:** the `duration_seconds`
-removal was originally justified as "this checkpoint's output length is
-fixed by the checkpoint itself, not a real parameter." That's wrong -
-`num_frames` turned out to be a plain editable input on the ComfyUI
-sampler node once the actual workflow was inspected (see
-`Video_generation.md` Challenge 3). The schema decision itself still
+**Correction, discovered while building Agent 6 (then numbered Agent 5):**
+the `duration_seconds` removal was originally justified as "this
+checkpoint's output length is fixed by the checkpoint itself, not a real
+parameter." That's wrong - `num_frames` turned out to be a plain editable
+input on the ComfyUI sampler node once the actual workflow was inspected
+(see `Video_generation.md` Challenge 3). The schema decision itself still
 stands (an LLM shouldn't be choosing this), just for a different reason:
-it's deterministic pipeline configuration that belongs to Agent 5's
+it's deterministic pipeline configuration that belongs to Agent 6's
 `Settings`, the same category as seed/steps/cfg - not something fixed and
 therefore moot.
 
@@ -179,7 +195,7 @@ therefore moot.
 Takes Agent 3's `PromptGenerationOutput`, turns each `ThemePromptSet`'s
 `image_prompt` into generated images via a local ComfyUI instance
 (SDXL-family checkpoint, core ComfyUI nodes - no custom node package
-needed here, unlike Agent 5).
+needed here, unlike Agent 6).
 
 ```
 start --> generate --> validate --+--> [more themes?] --+--> advance_theme --> generate (next theme)
@@ -220,22 +236,71 @@ output per product.
 
 No `prompts.py` here - generation is a deterministic API call, not an LLM
 call, so there's no prompt to construct. Candidate selection ("which of
-the N images per theme is best") is deliberately **not** modeled - no
-critic exists yet (that's Agent 6's job); this agent generates candidates
-and confirms they're real, nothing more. See `Image_generation.md` for the
-full narrative, including a state-schema bug (an undeclared LangGraph
-state key silently dropping generation results between nodes) that's
-worth reading before touching Agent 5's state.py, since the same class of
-mistake was guarded against there preemptively.
+the N images per theme is best") is deliberately **not** modeled here -
+that's Agent 5's job (see `Image_selection.md`); this agent generates
+candidates and confirms they're real, nothing more. See
+`Image_generation.md` for the full narrative, including a state-schema bug
+(an undeclared LangGraph state key silently dropping generation results
+between nodes) that's worth reading before touching a new agent's
+`state.py`, since the same class of mistake was guarded against
+preemptively in both Agent 5's and Agent 6's state.
 
-## Agent 5: Video Generation
+**Checkpointing:** this agent's `graph.py` accepts an optional
+`checkpointer` at compile time, used by the pipeline runner for real
+mid-loop resume (a crash on theme 3 of 5 doesn't mean redoing themes 1-2)
+- see "Checkpointing" below.
+
+## Agent 5: Image Selection (Critic)
+
+Takes Agent 4's `ImageGenerationOutput`, picks exactly one candidate image
+per theme - the source frame Agent 6 will animate - judged by a vision LLM
+against the theme's creative brief.
+
+```
+start --> select --+--> [more themes?] --+--> select (next theme)
+                    |                      |
+                    v                      +--> finalize --> END (all themes done)
+                    (always produces a result)
+```
+
+Simpler loop than Agents 4/6 - one node handles both retry and
+theme-advance, since this agent never leaves a theme without a result
+(see `Image_selection.md` Challenge 3).
+
+1. **start** - generates a `run_id`. No ComfyUI involvement at all - this
+   agent's only external call is a vision LLM judgment.
+2. **select** (`nodes.py` + `llm.py`'s `structured_chat_vision`) - a
+   deterministic pre-filter (`PIL.Image.verify()`) drops corrupt
+   candidates before spending a model call; survivors are shown together
+   to a vision LLM alongside the creative brief, which scores and ranks
+   them comparatively rather than independently. Below-threshold or
+   failed judgments still produce a selection, flagged via `status:
+   "selected_below_threshold"` - Agent 6 always gets exactly one frame per
+   non-skipped theme.
+3. **finalize** - assembles `ImageSelectionOutput` once every theme has
+   been attempted.
+
+Runs locally via Ollama (`qwen3.5:4b` - the same model Agent 1 uses for
+extraction, confirmed separately to be vision-capable), not on a hosted
+model. That wasn't the first choice - see `Image_selection.md` Challenges
+5-7 for two real hosted-model failures (a rate limit, then a strict
+schema-validation rejection) that led here, and for why the switch
+actually resolves the failure category by construction rather than just
+changing providers.
+
+Uses the flat JSON checkpoint (`app/core/checkpoint.py`), not LangGraph's
+native checkpointer - unlike Agents 4/6, a partial loss here is cheap
+(fast, single-shot vision calls, not GPU generation) - see "Checkpointing"
+below.
+
+## Agent 6: Video Generation
 
 Takes Agent 3's `PromptGenerationOutput` (for `video_prompt` per theme)
-**and** Agent 4's `ImageGenerationOutput` (for the source frame per
-theme) - the only agent in this pipeline that consumes two upstream
-outputs at once, since image-to-video generation needs both a prompt and
-a starting image. Runs `NimVideo/cogvideox-2b-img2vid` through a custom
-ComfyUI node package (not core nodes, unlike Agent 4).
+**and** Agent 5's `ImageSelectionOutput` (for the already-chosen source
+frame per theme) - the only agent in this pipeline that consumes two
+upstream outputs at once, since image-to-video generation needs both a
+prompt and a starting image. Runs `NimVideo/cogvideox-2b-img2vid` through a
+custom ComfyUI node package (not core nodes, unlike Agent 4).
 
 ```
 start --> generate --> validate --+--> [more themes?] --+--> advance_theme --> generate (next theme)
@@ -255,14 +320,14 @@ image batches did).
    Challenge 1) and generates a `run_id`, same convention as Agent 4.
 2. **generate** (`nodes.py` + `video_comfyui_client.py`, which subclasses
    Agent 4's `ComfyUIClient` rather than duplicating or editing it) -
-   picks a source image for the current theme (currently
-   `theme_result.images[0]` - a placeholder, since no critic exists yet
-   to pick a real "best" candidate), uploads it back to ComfyUI, builds
-   and queues the video workflow, polls to completion, and saves the
-   result under `<video_output_dir>/<slug>/<run_id>/theme_<n>/`. A theme
-   with no usable Agent 4 image (that theme was itself skipped upstream)
-   is recorded as an explicit `skipped_no_source_image` result rather
-   than burning a retry on something retrying can't fix.
+   looks up Agent 5's already-judged selection for the current theme and
+   reads its `selected_local_path` directly (no picking logic lives here
+   anymore - see `Video_generation.md` Challenge 6), uploads it back to
+   ComfyUI, builds and queues the video workflow, polls to completion, and
+   saves the result under `<video_output_dir>/<slug>/<run_id>/theme_<n>/`.
+   A theme with no usable source frame is recorded as an explicit
+   `skipped_no_source_image` result rather than burning a retry on
+   something retrying can't fix.
 3. **validate** - lowest bar of any agent so far: did `generate_node`
    produce a result at all (success or explicit skip) - there's no
    "count" to check, it's always exactly one video or nothing.
@@ -280,6 +345,37 @@ legitimately running and about to succeed. Both are written up in full in
 `Video_generation.md` Challenges 4 and 5 - worth reading before assuming
 similar defensive cleanup calls are safe elsewhere in this pipeline.
 
+**Checkpointing:** same as Agent 4 - a `checkpointer`-accepting `graph.py`
+for real mid-loop resume, given this agent's real measured cost (up to
+~4500s per attempt; ~1964s for an actual 2-video run) - see
+"Checkpointing" below.
+
+## Checkpointing
+
+Two different mechanisms, used for different stages on purpose - they
+answer different questions and neither is a strict upgrade of the other:
+
+- **`app/core/checkpoint.py`** - flat JSON, one file per stage
+  (`outputs/checkpoints/<slug>/<stage>.json`), written after a stage fully
+  succeeds. Used for Agents 1, 2, 3, and 5 - fast, single-shot stages
+  where the only question worth asking is "did this whole stage already
+  finish." A crash mid-stage means redoing that stage from zero, which is
+  cheap for these four.
+- **`app/core/langgraph_checkpoint.py`** - wraps LangGraph's own
+  checkpointer (`AsyncSqliteSaver`), used for Agents 4 and 6 specifically,
+  the two stages where a partial loss is actually expensive (image
+  batches; up to ~4500s per video attempt). This persists state after
+  every node, not just at the end, so a crash after video 1 of 2 succeeded
+  resumes at video 2, not video 0 - a distinction the flat JSON mechanism
+  can't express. `run_checkpointed()` picks between three outcomes (never
+  started / partway through / already finished) by reading
+  `graph.aget_state(config)`, not just two.
+
+Both are keyed by the product URL (slugified), not a run ID, so re-running
+the same command against the same URL always resumes rather than
+restarting. `--fresh` forces a clean run through both mechanisms;
+`--clear-checkpoints` wipes everything for a URL without running anything.
+
 ## Setup
 
 ```bash
@@ -292,14 +388,14 @@ cp .env.example .env
 `.env` needs:
 
 ```bash
-# Agent 1 - Ollama (local)
+# Agent 1 (extraction) & Agent 5 (vision judgment) - Ollama (local)
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_RESEARCH_MODEL=qwen3.5:4b
 
 # Agents 2 & 3 - Groq (cloud)
 GROQ_API_KEY=your-key-here
 
-# Agents 4 & 5 - ComfyUI (local)
+# Agents 4 & 6 - ComfyUI (local)
 COMFYUI_SERVER=http://127.0.0.1:8188
 ```
 
@@ -307,18 +403,26 @@ COMFYUI_SERVER=http://127.0.0.1:8188
 ollama pull qwen3.5:4b
 ```
 
+Confirm vision support before relying on Agent 5 - it's not automatic just
+because the model family is multimodal upstream (see `Image_selection.md`
+Challenge 7):
+
+```bash
+ollama show qwen3.5:4b   # look for "vision" under Capabilities
+```
+
 **Agent 4** needs a local ComfyUI instance running with the
 `juggernautXL_ragnarok.safetensors` checkpoint (or whatever
 `comfyui_checkpoint` points at) installed.
 
-**Agent 5** needs, on top of that:
+**Agent 6** needs, on top of that:
 - `NimVideo/cogvideox-2b-img2vid` downloaded (e.g. via `huggingface-cli`)
   and the matching custom ComfyUI node package cloned - this checkpoint
   does **not** run on core ComfyUI nodes, unlike Agent 4's.
 - The workflow exported in **API format**, not the UI-canvas format most
   ComfyUI workflow downloads ship as (Settings -> enable Dev Mode -> load
   the workflow -> "Save (API Format)", a different button from plain
-  "Save"). Loading the wrong format fails loudly at Agent 5's `start_node`
+  "Save"). Loading the wrong format fails loudly at Agent 6's `start_node`
   rather than silently misbehaving.
 - That exported JSON placed at whatever `comfyui_video_workflow_json`
   points at (default `workflows/cogvideox-2b-img2vid-workflow-API.json`,
@@ -329,6 +433,13 @@ ollama pull qwen3.5:4b
   card at different frame counts. This checkpoint is meaningfully heavier
   than Agent 4's SDXL-family checkpoint.
 
+**Checkpointing** (Agents 4 & 6) needs two extra packages beyond
+`requirements.txt`'s base set:
+
+```bash
+pip install aiosqlite langgraph-checkpoint-sqlite
+```
+
 Groq's free tier is enough to develop against (1K requests/day per model as
 of writing - see `Creative_strategy.md` Challenge 1 for why that's not
 actually the binding constraint it looks like at first, and
@@ -338,7 +449,10 @@ periodically checking your configured model strings (`groq_primary_model`,
 `groq_fallback_model`, `prompt_gen_primary_model`,
 `prompt_gen_fallback_model`) against Groq's current model catalog -
 deprecated models fail silently into the fallback chain rather than raising
-an obvious error; see `Prompt_generation.md` Challenge 4.
+an obvious error; see `Prompt_generation.md` Challenge 4. The same lesson
+bit harder on a *hosted* model chosen for Agent 5 originally - see
+`Image_selection.md` Challenges 5-6 for a real rate limit and a real
+strict-schema rejection that ultimately motivated moving that agent local.
 
 ## Running
 
@@ -363,12 +477,15 @@ python scripts/test_pipeline_live.py https://example-store.com/products/some-wid
 ```
 
 ```bash
-# All five agents chained - tests the full research-to-video handoff
+# All six agents chained - tests the full research-to-video handoff
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget
+python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --fresh
+python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --clear-checkpoints
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --research-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --creative-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --prompts-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --images-only
+python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --selection-only
 python scripts/test_full_pipeline_live.py https://example-store.com/products/some-widget --save
 ```
 
@@ -377,12 +494,33 @@ or exhausted retries at whichever stage failed). Each stage prints its
 elapsed time and retry count separately - useful for figuring out which
 stage actually owns a slow run rather than guessing (see
 `Prompt_generation.md` Challenge 5, where scrape latency was initially
-mis-attributed to Agent 1's local model). `--images-only` is worth reaching
-for by default while iterating on Agent 5 specifically - video generation
-is by a wide margin the slowest stage in this pipeline (see
-`Video_generation.md` Challenge 2 for how much slower, in real measured
-numbers), and re-running Agents 1-4 every time is pure waste while
-debugging Agent 5 alone.
+mis-attributed to Agent 1's local model). `--images-only` and
+`--selection-only` are worth reaching for while iterating on Agent 6
+specifically - video generation is by a wide margin the slowest stage in
+this pipeline (see `Video_generation.md` Challenge 2 for how much slower,
+in real measured numbers), and re-running everything upstream every time
+is pure waste while debugging Agent 6 alone. Since checkpointing is the
+default, re-running the same command without `--fresh` already skips
+whatever finished last time - these flags are for stopping *early*, not
+for avoiding recomputation, which happens automatically.
+
+Real end-to-end run (all six agents, no early-exit flag), against
+`bananaclub.co.in/products/lion_embroidered_black_patent_loafers`:
+
+```
+research:   55.67s
+creative:    5.75s
+prompts:     4.99s
+images:    472.92s
+selection:  26.36s
+videos:   1963.87s
+─────────────────
+total:    2529.68s  (~42 minutes)
+```
+
+Video Generation dominates the total by a wide margin - this is why it's
+one of the two stages on LangGraph's native checkpointer rather than the
+flat JSON mechanism (see "Checkpointing" above).
 
 ## Configuration notes
 
@@ -404,13 +542,24 @@ Worth understanding rather than just accepting the defaults:
 | `prompt_gen_primary_model` / `prompt_gen_fallback_model` | `openai/gpt-oss-120b` / `openai/gpt-oss-20b` | Agent 3's model chain - kept as its own settings block, separate from Agent 2's, because prompt-writing for generation models is a different skill from ad copywriting. The primary is an inherited placeholder, not yet validated with its own comparison test - see `Prompt_generation.md`. |
 | `prompt_gen_temperature` | 0.6 | Slightly lower than Agent 2's 0.7 - prompt-writing benefits from more precision/consistency than open-ended ad copy, but still needs some variation across 2-3 distinct visual themes. |
 | `max_prompt_gen_retries` | 2 | Agent 3's retry budget. |
+| `comfyui_checkpoint` | `juggernautXL_ragnarok.safetensors` | Agent 4's SDXL-family checkpoint. |
+| `total_images_per_product` / `max_image_gen_retries` | 5 / 2 | Agent 4's total candidate images (split across themes via `distribute_total()`) and retry budget. |
+| `comfyui_video_num_frames` | 41 | Real runtime parameter, not fixed by the checkpoint - see `Video_generation.md` Challenge 3. Must be `4n+1` for CogVideoX's temporal VAE. |
+| `comfyui_video_generation_timeout_seconds` | 4500.0 | Set from real measured per-attempt cost, not a guess - see `Video_generation.md` Challenge 2. |
+| `max_video_gen_retries` | 0 | A cost decision, not a resilience default - a "free" retry costs another ~60 minutes on this hardware. See `Video_generation.md` Challenge 2. |
+| `image_selection_model` | `qwen3.5:4b` (Ollama, local) | Agent 5's vision judgment model. Originally a hosted Groq preview model - moved local after two real failures (rate limit, then strict-schema rejection). See `Image_selection.md` Challenges 5-7. |
+| `image_selection_score_threshold` | 55 | Below this, Agent 5 still picks a candidate (Agent 6 needs one regardless) but flags it `selected_below_threshold`. |
+| `image_selection_max_images_per_call` | 5 | No longer a hard API ceiling (that was Groq-specific) - kept as a soft cap for latency/focus even on local inference. |
+| `max_image_selection_retries` | 2 | Agent 5's retry budget - cheap to raise, since these are fast local calls, not GPU generation. |
 
 ## Files
 
 | File | Responsibility |
 |---|---|
-| `app/core/config.py` | Env-driven settings for all three agents |
-| `app/core/llm.py` | `structured_chat` (Ollama - manual schema-hint, tolerant extractor, streaming early-stop) and `structured_chat_groq` (native schema-constrained decoding) - both reusable by later agents |
+| `app/core/config.py` | Env-driven settings for all six agents |
+| `app/core/llm.py` | `structured_chat` (Ollama text), `structured_chat_vision` (Ollama + images, used by Agent 5), `structured_chat_groq` (Groq text, used by Agents 2/3) |
+| `app/core/checkpoint.py` | Flat JSON stage checkpoint (Agents 1, 2, 3, 5) |
+| `app/core/langgraph_checkpoint.py` | LangGraph-native resume helper (`run_checkpointed`), used by Agents 4 and 6 |
 | `app/agents/research_agent/schema.py` | `ProductResearch` output contract + `ScrapedProductData` intermediate shape |
 | `app/agents/research_agent/scraper.py` | Playwright fetch + JSON-LD/OG/text extraction, cost-aware review-scroll escalation |
 | `app/agents/research_agent/prompts.py` | System + user prompt for the extraction call |
@@ -427,13 +576,32 @@ Worth understanding rather than just accepting the defaults:
 | `app/agents/prompt_gen_agent/state.py` | LangGraph state TypedDict |
 | `app/agents/prompt_gen_agent/nodes.py` | Node functions, model-fallback chain, retry/validation routing |
 | `app/agents/prompt_gen_agent/graph.py` | Graph assembly |
+| `app/agents/image_generation/schema.py` | `ImageGenerationOutput` output contract + `GeneratedImage`/`ThemeGenerationResult` |
+| `app/agents/image_generation/state.py` | LangGraph state TypedDict |
+| `app/agents/image_generation/nodes.py` | Node functions, ComfyUI calls, retry/validation routing |
+| `app/agents/image_generation/graph.py` | Graph assembly - accepts an optional `checkpointer` |
+| `app/agents/image_generation/comfyui_client.py` | Generic ComfyUI HTTP client (queue/poll/fetch), base class for Agent 6's client |
+| `app/agents/image_generation/aspect_ratio.py` | `aspect_ratio` string -> pixel dimensions |
+| `app/agents/image_selection_agent/schema.py` | `ImageSelectionOutput` output contract + `ImageCandidateScore`/`ImageCritiqueResponse`/`ThemeSelectionResult` |
+| `app/agents/image_selection_agent/prompts.py` | Critic system prompt (local-checkpoint-calibrated rubric) + user prompt builder |
+| `app/agents/image_selection_agent/state.py` | LangGraph state TypedDict |
+| `app/agents/image_selection_agent/nodes.py` | Node functions - deterministic pre-filter, vision judgment call, always-produces-a-result failure handling |
+| `app/agents/image_selection_agent/graph.py` | Graph assembly |
+| `app/agents/video_generation/schema.py` | `VideoGenerationOutput` output contract + `GeneratedVideo`/`ThemeVideoResult` |
+| `app/agents/video_generation/state.py` | LangGraph state TypedDict - consumes Agent 5's `ImageSelectionOutput` |
+| `app/agents/video_generation/nodes.py` | Node functions, ComfyUI calls, retry/validation routing |
+| `app/agents/video_generation/graph.py` | Graph assembly - accepts an optional `checkpointer` |
+| `app/agents/video_generation/video_comfyui_client.py` | Subclasses Agent 4's `ComfyUIClient`, overrides `wait_for_completion` |
 | `scripts/test_live.py` | Standalone step-by-step debugging runner for Agent 1 |
 | `scripts/test_pipeline_live.py` | Chains Agent 1 into Agent 2 for two-stage testing |
-| `scripts/test_full_pipeline_live.py` | Chains all three agents for end-to-end testing, with per-stage early-exit flags |
+| `scripts/test_full_pipeline_live.py` | Chains all six agents for end-to-end testing, with per-stage early-exit flags and checkpointing |
 | `main.py` | CLI runner for Agent 1, standalone |
 | `Product_research.md` | Agent 1 design narrative - challenges hit, decisions made, why |
 | `Creative_strategy.md` | Agent 2 design narrative - same format |
 | `Prompt_generation.md` | Agent 3 design narrative - same format |
+| `Image_generation.md` | Agent 4 design narrative - same format |
+| `Image_selection.md` | Agent 5 design narrative - same format |
+| `Video_generation.md` | Agent 6 design narrative - same format |
 
 ## Known gaps to revisit
 
@@ -455,8 +623,11 @@ Worth understanding rather than just accepting the defaults:
   fallback chain treats any primary-model failure the same way (fall
   through to secondary immediately) rather than distinguishing a
   rate-limit error (worth a backoff-and-retry-same-model) from a genuine
-  failure. Not implemented - no evidence yet this distinction has mattered
-  at current request volume.
+  failure. Not implemented for these two agents - Agent 5 did end up
+  needing exactly this distinction in practice (`LLMRateLimitError`, see
+  `Image_selection.md` Challenge 5) before moving off the hosted model
+  that needed it; worth reconsidering whether Agents 2/3 are still safe
+  without it or just haven't hit the same volume yet.
 - **Generalizing lazy-load escalation beyond reviews** (Agent 1): the
   scroll-escalation heuristic is review-specific. The more general version
   would tie escalation to whatever the LLM's `missing_fields` output flags
@@ -467,15 +638,36 @@ Worth understanding rather than just accepting the defaults:
   chosen via a real 2-3 candidate comparison against sample
   `CreativeDirection` inputs. Worth running before trusting it - see
   `Prompt_generation.md`.
-- **Image/video aspect ratio mismatch** (Agents 3 & 4, to resolve when the
-  video generation agent is built): `ImageGenerationPrompt.aspect_ratio` is
-  chosen per-theme for social framing (e.g. `4:5`, `9:16`), but the
-  confirmed video target (`NimVideo/cogvideox-2b-img2vid`) has a fixed
-  720x480 landscape output. Whichever generated image ends up selected as a
-  video's source frame will need reconciling with that fixed resolution -
-  resize/letterbox vs. crop - not yet decided.
-- **LangGraph HITL / persistence / streaming-to-UI**: none implemented at
-  any agent's level. Persistence belongs at the bulk-processing job-queue
-  layer (resume a crashed batch without re-paying for completed LLM calls);
-  HITL belongs as a gate before the expensive image/video generation
-  stages, not inside extraction/strategy/prompt-generation themselves.
+- **Image/video aspect ratio mismatch** (Agents 3 & 6): `ImageGenerationPrompt.
+  aspect_ratio` is chosen per-theme for social framing (e.g. `4:5`,
+  `9:16`), but the confirmed video target
+  (`NimVideo/cogvideox-2b-img2vid`) has a fixed 720x480 landscape output.
+  Whichever image Agent 5 selects as a video's source frame still needs
+  reconciling with that fixed resolution - resize/letterbox vs. crop - not
+  yet decided.
+- **Cross-agent regeneration loop** (Agent 5): if every candidate for a
+  theme scores below threshold, Agent 5 currently falls back to the
+  best-available candidate rather than asking Agent 4 to regenerate. No
+  such loop exists yet - see `Image_selection.md` Challenge 3. Worth
+  building only if real failure rates justify it.
+- **Local vs. hosted judgment quality unvalidated** (Agent 5): the switch
+  to a local model was driven by reliability, not a head-to-head quality
+  comparison against a working hosted baseline that never actually
+  existed (the hosted path failed most of the time it was tried). Worth a
+  real comparison once there's a fuller picture of end-to-end output
+  quality to judge against.
+- **Video-quality critic** (new agent, not yet built): a second critic,
+  judging Agent 6's *finished* videos rather than Agent 4's candidate
+  frames, was deliberately deferred until Agent 5 proved itself in
+  practice. It has - this is the natural next agent, with a
+  flag-and-pass-through failure mode (not auto-regeneration, matching the
+  reasoning behind `max_video_gen_retries: 0`).
+- **LangGraph HITL / streaming-to-UI**: not implemented at any agent's
+  level. Persistence, however, now partially is - Agents 4 and 6 use
+  LangGraph's own node-level checkpointer (see "Checkpointing" above);
+  Agents 1, 2, 3, and 5 use a simpler flat-JSON, whole-stage mechanism.
+  Both were added at the orchestration/pipeline-runner level, not inside
+  any individual agent's own logic. HITL still belongs as a gate before
+  the expensive image/video generation stages, not inside
+  extraction/strategy/prompt-generation/selection themselves - not yet
+  built.
